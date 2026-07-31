@@ -19,8 +19,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import osmnx as ox
-
 from app.helpers import nearest_node
+
 from router.core.dijkstra import dijkstra, reconstruct_path
 from router.corridor.pipeline import build_corridor
 from router.graph.config import verona

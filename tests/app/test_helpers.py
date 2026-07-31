@@ -2,7 +2,6 @@
 
 import numpy as np
 import pytest
-
 from app.helpers import (
     format_delta,
     format_duration,
@@ -12,6 +11,7 @@ from app.helpers import (
     source_node_of_position,
     traffic_summary,
 )
+
 from router.traffic.pipeline import TrafficResult
 
 
