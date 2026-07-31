@@ -10,10 +10,9 @@ representation, with `networkx` used only as a correctness oracle in tests.
 
 ## Status
 
-**Milestone 2 — graph layer.** OSM download with disk caching, projection to a metric CRS,
-free-flow speed/travel-time imputation, and the CSR adapter that the routing core will consume
-are in place, tested against a small committed Verona extract. No routing algorithms yet — see
-the roadmap below.
+**Milestone 3 — routing core.** Dijkstra and A* are implemented from scratch over CSR arrays,
+verified against networkx (property-based tests with `hypothesis`, plus golden tests on the
+committed Verona extract) and benchmarked on the full Verona network. See the roadmap below.
 
 ## Modelling assumptions
 
@@ -59,6 +58,44 @@ A small extract around Piazza Bra, Verona (`tests/fixtures/verona_center.graphml
 edges, © OpenStreetMap contributors, ODbL) is committed as a test fixture and exercised
 end-to-end by the golden tests.
 
+`src/router/core/` provides:
+
+- `dijkstra` — single-source shortest path over CSR arrays with a binary heap. Assumes
+  non-negative edge weights (stated in the docstring, since that assumption is exactly what
+  makes lazy-deletion Dijkstra correct instead of requiring Bellman-Ford).
+- `astar` — same search, guided by `heuristic(u) = great_circle_distance(u, target) / v_max`.
+  Admissible because no travel-time path can beat covering the remaining straight-line distance
+  at the fastest speed anywhere in the graph, so the heuristic never overestimates true remaining
+  cost.
+- `reconstruct_path` — turns a predecessor array back into a node sequence.
+
+Correctness is checked two ways: `hypothesis`-generated random directed graphs compared against
+`networkx.single_source_dijkstra_path_length` (Dijkstra), and against a construction where every
+edge weight is `distance / speed` with `speed <= v_max` — which guarantees the A* heuristic is
+admissible by the triangle inequality on great-circle distance, so A*'s cost must equal
+Dijkstra's (A*); plus golden tests running both algorithms on the committed Verona fixture.
+
+### Benchmark
+
+`scripts/benchmark_core.py` downloads the full default area (not committed; cached under
+`data/cache/`) and times 20 random origin/destination queries. On Verona (41,460 nodes, 91,074
+edges):
+
+| Algorithm | Mean wall time (ms) | Mean settled nodes |
+|---|---|---|
+| networkx Dijkstra | 36.5 | n/a |
+| Our Dijkstra (CSR) | 13.8 | 17,005 |
+| Our A* (CSR) | 15.4 | 9,608 |
+
+Our Dijkstra is ~2.6x faster than networkx's, not the 10–50x CLAUDE.md's architecture notes
+anticipate — both implementations are pure Python, so a hand-rolled `heapq` loop saves networkx's
+object-graph overhead but doesn't escape Python's per-operation cost. A* settles roughly half the
+nodes Dijkstra does (the admissible heuristic prunes the search well) but isn't faster in wall
+time here: haversine/trig calls per heap push are expensive enough in pure Python to offset the
+work saved. A C-level implementation (numpy-vectorised or `scipy.sparse.csgraph`) would very
+likely close both gaps; documented here rather than papered over, since being able to explain a
+benchmark's limits is as important to this project as the number itself.
+
 ## Development
 
 ```bash
@@ -81,8 +118,8 @@ TomTom Traffic API and is subject to TomTom's terms of use.
 ## Roadmap
 
 1. Scaffolding
-2. Graph layer — OSM download, caching, CSR adapter, test fixture *(this milestone)*
-3. Routing core — Dijkstra, A*, hypothesis + golden tests, benchmark
+2. Graph layer — OSM download, caching, CSR adapter, test fixture
+3. Routing core — Dijkstra, A*, hypothesis + golden tests, benchmark *(this milestone)*
 4. Corridor — ellipse bound, Yen on the ellipse subgraph
 5. Traffic — TomTom client, probe sampling, matching, second pass
 6. Turn restrictions — line graph, turn penalties
