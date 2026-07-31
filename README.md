@@ -10,9 +10,21 @@ representation, with `networkx` used only as a correctness oracle in tests.
 
 ## Status
 
-**Milestone 6 — turn restrictions.** OSM turn-restriction relations are fetched via Overpass and
-resolved to graph edges; a line-graph adapter turns them into absent or pruned arcs (and turn
-penalties, e.g. for U-turns) with no changes to the routing core at all. See the roadmap below.
+**Milestone 7 — UI.** A Streamlit app ties every earlier milestone together: pick an origin and
+destination on the map, by search, or by pasting coordinates; compare the free-flow route against
+the traffic-adjusted one; see the corridor and which edges actually got live data. Runs with no
+TomTom API key at all. See the roadmap below.
+
+## Try it
+
+```bash
+pip install -e ".[dev,viz,app]"
+streamlit run app/main.py
+```
+
+First load downloads and caches the default area's road network (a minute or two); after that,
+`streamlit run` is fast. No TomTom key needed to try it — the sidebar has an optional field for
+one.
 
 ## Modelling assumptions
 
@@ -250,6 +262,30 @@ mocked-HTTP client test suite (no real network calls), and a golden test running
 pass on the Verona fixture's corridor with a fake "always congested" client, asserting the
 traffic-aware route is never faster than free-flow.
 
+### UI (`app/`)
+
+`app/main.py` is the Streamlit entry point; `app/helpers.py` holds every piece of logic that
+doesn't touch `st.*` or `folium.*` directly (nearest-node snapping, duration formatting, the
+traffic-status message, a CSR position → source-node lookup for highlighting matched edges), kept
+separate specifically so it's unit-testable without a running Streamlit session.
+
+- **Origin/destination**, three ways: click the map (a radio picks which point the next click
+  sets), type a place name and hit Search (geocoded via `osmnx`/Nominatim), or paste `lat, lon`
+  directly.
+- **Comparison**: free-flow ETA, traffic-aware ETA, and the delta, plus both routes drawn on one
+  map (solid blue vs dashed red) so the two are visually easy to tell apart.
+- **Corridor and live-data layers**: toggleable via the map's layer control, same idea as
+  `scripts/debug_corridor.py` — the corridor subgraph the search actually considered, and which of
+  its edges got real TomTom data (the rest silently kept their free-flow weight).
+- **No-key fallback, visibly**: with no TomTom key, a warning banner says so and both routes are
+  identical, rather than the app silently pretending it had traffic data.
+
+Verified by actually running the app — `streamlit.testing.v1.AppTest` executes `app/main.py`
+server-side (the officially supported way to test a Streamlit script without a browser) and was
+used to drive the golden path end-to-end: load the default area, click "Compute route", confirm
+zero exceptions, correct ETAs, and the expected no-key warning; and the same-origin/destination
+error path, confirming it fails cleanly rather than crashing.
+
 ## Development
 
 ```bash
@@ -278,6 +314,6 @@ TomTom Traffic API and is subject to TomTom's terms of use.
 3. Routing core — Dijkstra, A*, hypothesis + golden tests, benchmark
 4. Corridor — ellipse bound, Yen on the ellipse subgraph
 5. Traffic — TomTom client, probe sampling, matching, second pass
-6. Turn restrictions — line graph, turn penalties *(this milestone)*
-7. UI — Streamlit map with free-flow vs traffic-aware comparison
+6. Turn restrictions — line graph, turn penalties
+7. UI — Streamlit map with free-flow vs traffic-aware comparison *(this milestone)*
 8. Documentation and benchmarks
