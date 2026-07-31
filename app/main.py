@@ -9,6 +9,7 @@ else's credentials to start.
 from __future__ import annotations
 
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -19,6 +20,7 @@ import folium
 import numpy as np
 import osmnx as ox
 import streamlit as st
+from dotenv import load_dotenv
 from pyproj import Transformer
 from streamlit_folium import st_folium
 
@@ -153,6 +155,12 @@ def render_result() -> None:
 
 
 def main() -> None:
+    # Loads TOMTOM_API_KEY (and anything else) from a `.env` file in the
+    # project root into the environment, if present — never overrides a
+    # variable already set in the real environment. `.env` itself is
+    # gitignored; see .env.example.
+    load_dotenv()
+
     st.title("Traffic-aware router")
     st.caption(
         "Static free-flow shortest path (Dijkstra on the full network) vs a traffic-adjusted "
@@ -175,7 +183,23 @@ def main() -> None:
         k = st.slider("Yen's k candidate paths", 1, 8, 4)
 
         st.header("Traffic")
-        api_key = st.text_input("TomTom API key (optional)", type="password")
+        env_key = os.environ.get("TOMTOM_API_KEY")
+        use_env_key = st.toggle(
+            "Use TOMTOM_API_KEY from environment / .env file",
+            value=bool(env_key),
+            disabled=not env_key,
+        )
+        if use_env_key:
+            api_key = env_key
+            st.caption("✓ Using the key from the environment." if env_key else "")
+        else:
+            api_key = st.text_input("TomTom API key (optional)", type="password")
+        if not env_key:
+            st.caption(
+                "No TOMTOM_API_KEY found in the environment or a `.env` file — copy "
+                "`.env.example` to `.env` and fill it in to avoid pasting a key here "
+                "every session."
+            )
         st.caption("Get a free key at developer.tomtom.com — no credit card required.")
 
         st.header("Origin / destination")

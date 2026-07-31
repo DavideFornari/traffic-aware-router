@@ -33,7 +33,7 @@ streamlit run app/main.py
 
 First load downloads and caches the default area's road network (a minute or two); after that,
 `streamlit run` is fast. No TomTom key needed to try it — the sidebar has an optional field for
-one.
+one, or copy `.env.example` to `.env` and it's picked up automatically (see Development below).
 
 ## Modelling assumptions
 
@@ -356,9 +356,12 @@ make format  # ruff format + autofix
 ```
 
 The app will run without a TomTom API key: with no key it falls back to free-flow-only routing
-and says so in the UI. To enable live traffic, set `TOMTOM_API_KEY` in your shell environment
-(get a free key at developer.tomtom.com — no credit card required). Never commit a real key or a
-`.env` file.
+and says so in the UI. To enable live traffic without pasting a key into the sidebar every
+session, copy `.env.example` to `.env` and fill in a free key (developer.tomtom.com — no credit
+card required); `app/main.py` loads it via `python-dotenv` (part of the `app` extra) at startup.
+`.env` is gitignored — **never commit a real key or a `.env` file**; `.env.example` is the
+committed template. A sidebar toggle switches between the environment/`.env` key and pasting one
+in for just that session (disabled automatically if no `TOMTOM_API_KEY` is found anywhere).
 
 ## Licences
 

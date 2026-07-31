@@ -39,6 +39,7 @@ viz = [
 app = [
     "streamlit>=1.35",
     "streamlit-folium>=0.20",
+    "python-dotenv>=1.0",
 ]
 
 [tool.setuptools.packages.find]
