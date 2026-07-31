@@ -10,10 +10,10 @@ representation, with `networkx` used only as a correctness oracle in tests.
 
 ## Status
 
-**Milestone 4 — corridor.** The ellipse time-budget bound, Yen's k-shortest-paths on the ellipse
-subgraph, and the buffered union that recovers structurally different alternatives are in place,
-tested against the committed Verona extract and visualised with a debug map script. See the
-roadmap below.
+**Milestone 5 — traffic.** The TomTom Flow Segment Data client, probe sampling, polyline-to-edge
+matching (with the bearing check that catches opposite-carriageway mismatches), a TTL cache, and
+the traffic-adjusted second pass are in place. The app still runs with no TomTom API key at all —
+it falls back to free-flow-only routing. See the roadmap below.
 
 ## Modelling assumptions
 
@@ -136,6 +136,52 @@ subgraph (coloured by whether the ellipse or the buffer pulled a node in), and t
 — since this geometry is exactly the kind of thing that's easy to get subtly wrong (wrong CRS, an
 inverted containment test) in a way unit tests on synthetic coordinates can miss.
 
+### Traffic (`src/router/traffic/`)
+
+The endpoint, its parameters, and the free tier were checked against TomTom's live docs before
+writing any client code, not assumed:
+
+- **Endpoint:** `GET https://api.tomtom.com/traffic/services/4/flowSegmentData/{style}/{zoom}/json
+  ?key=...&point={lat},{lon}&unit=kmph`, returning `currentSpeed`, `freeFlowSpeed`,
+  `roadClosure`, and the matched segment's own polyline (`coordinates.coordinate[]`).
+- **Free tier:** 20,000 requests/month, no credit card required (docs.tomtom.com/pricing,
+  checked at implementation time — TomTom can change this, so reverify before relying on it).
+
+Modules:
+
+- `TomTomClient` — wraps the endpoint above. Reads `TOMTOM_API_KEY` from the environment if no
+  key is passed explicitly. **With no key, every call is a no-op returning `None`** — this is
+  where CLAUDE.md's hard constraint (the app must run without a TomTom key) is actually enforced;
+  everything downstream already treats "no traffic data for this edge" as the normal case.
+- `sample_probe_points` — places one probe per ~300m of corridor length (default; configurable),
+  at edge midpoints, rather than once per OSM edge — a city-scale corridor can have thousands of
+  edges, and the free tier is 20,000 requests/month. Deduplicates a two-way street's forward/
+  backward edges into a single probe first.
+- `edge_matches_segment` — the fiddliest, least visible part of this project (per CLAUDE.md).
+  Requires both a buffered geometric overlap *and* a bearing check (reject if the edge's and the
+  segment's directions differ by more than ~30 degrees, default). The bearing check specifically
+  exists to catch **opposite-carriageway assignment**: a dual carriageway's two directions run a
+  few metres apart, so distance alone can't tell them apart, but their directions are ~180
+  degrees apart, easily caught by bearing. Documented (but *not* handled — flagged as a real
+  limitation) failure mode: **vertically stacked roads** (bridges/underpasses), which look
+  identical in this 2D matching regardless of buffer or bearing.
+- `TrafficCache` — TTL cache (default 5 minutes) keyed by projected coordinates quantised to a
+  ~50m grid, so overlapping corridors or repeat queries reuse probes instead of spending quota.
+- `apply_traffic` — the second pass: samples the corridor, fetches/matches each probe, and
+  returns a copy of the corridor's weights with matched edges scaled by `free_flow_speed /
+  current_speed`. Deliberately resilient at every step — no key, a bad response, a network error,
+  an expired key, or a rejected match all just leave that edge at its free-flow weight rather than
+  raising, so a route is always produced even when traffic data is partly or wholly unavailable.
+
+Other documented error modes (not specific to the bearing check): a TomTom segment spanning
+several short OSM edges, or several TomTom segments covering one long OSM edge — either can leave
+a queried edge only partially represented by its match.
+
+Tested with unit tests per module (including the bearing/buffer boundary cases directly), a fully
+mocked-HTTP client test suite (no real network calls), and a golden test running the whole second
+pass on the Verona fixture's corridor with a fake "always congested" client, asserting the
+traffic-aware route is never faster than free-flow.
+
 ## Development
 
 ```bash
@@ -146,7 +192,9 @@ make format  # ruff format + autofix
 ```
 
 The app will run without a TomTom API key: with no key it falls back to free-flow-only routing
-and says so in the UI.
+and says so in the UI. To enable live traffic, set `TOMTOM_API_KEY` in your shell environment
+(get a free key at developer.tomtom.com — no credit card required). Never commit a real key or a
+`.env` file.
 
 ## Licences
 
@@ -160,8 +208,8 @@ TomTom Traffic API and is subject to TomTom's terms of use.
 1. Scaffolding
 2. Graph layer — OSM download, caching, CSR adapter, test fixture
 3. Routing core — Dijkstra, A*, hypothesis + golden tests, benchmark
-4. Corridor — ellipse bound, Yen on the ellipse subgraph *(this milestone)*
-5. Traffic — TomTom client, probe sampling, matching, second pass
+4. Corridor — ellipse bound, Yen on the ellipse subgraph
+5. Traffic — TomTom client, probe sampling, matching, second pass *(this milestone)*
 6. Turn restrictions — line graph, turn penalties
 7. UI — Streamlit map with free-flow vs traffic-aware comparison
 8. Documentation and benchmarks
