@@ -10,10 +10,9 @@ representation, with `networkx` used only as a correctness oracle in tests.
 
 ## Status
 
-**Milestone 5 — traffic.** The TomTom Flow Segment Data client, probe sampling, polyline-to-edge
-matching (with the bearing check that catches opposite-carriageway mismatches), a TTL cache, and
-the traffic-adjusted second pass are in place. The app still runs with no TomTom API key at all —
-it falls back to free-flow-only routing. See the roadmap below.
+**Milestone 6 — turn restrictions.** OSM turn-restriction relations are fetched via Overpass and
+resolved to graph edges; a line-graph adapter turns them into absent or pruned arcs (and turn
+penalties, e.g. for U-turns) with no changes to the routing core at all. See the roadmap below.
 
 ## Modelling assumptions
 
@@ -58,6 +57,75 @@ app/                   Streamlit UI
 A small extract around Piazza Bra, Verona (`tests/fixtures/verona_center.graphml`, 66 nodes, 126
 edges, © OpenStreetMap contributors, ODbL) is committed as a test fixture and exercised
 end-to-end by the golden tests.
+
+### Turn restrictions (`src/router/graph/restrictions.py`, `line_graph.py`)
+
+OSM encodes a banned turn as a `type=restriction` relation between a `from` way, a `via` node (or
+way), and a `to` way — a relation between ways, not a property of any single edge — and osmnx
+doesn't fetch or apply these.
+
+- `fetch_turn_restrictions` — queries Overpass directly for `type=restriction` relations within a
+  bounding box (`graph_bbox` derives it from the downloaded graph's own node extent, so
+  restrictions always cover exactly the area actually routed on, regardless of whether the graph
+  was fetched by place name or bbox).
+- `resolve_restrictions` — maps each relation's `from`/`via`/`to` members onto concrete edges of a
+  specific graph, by finding the edge whose `osmid` matches the `from`/`to` way and which is
+  incident to the `via` node. Restrictions via a *way* (rather than a node) are skipped —
+  resolving them would need splitting that way into the specific edge sequence the relation
+  implies, which this project doesn't attempt — and so is any restriction whose way or node isn't
+  found in the graph at all (osmnx can simplify, merge, or drop what a relation refers to). Both
+  are documented limitations, not silent gaps: an unresolved restriction is never enforced, but
+  it's also never silently misapplied to the wrong edge.
+- `build_line_graph` — the adapter. Each line-graph node is a directed real edge; each line-graph
+  edge is a maneuver from one real edge to the next through the node they share. A banned turn is
+  simply an absent arc; an `only_*` restriction removes every *other* arc leaving its via node for
+  the given `from` edge; a turn penalty (e.g. for U-turns, demonstrated via `u_turn_penalty_s`) is
+  extra cost on an arc. **The routing core is completely unchanged by this** — `build_line_graph`
+  produces an `nx.MultiDiGraph` that goes through the exact same `build_csr` as the node graph;
+  Dijkstra and A* never know the difference.
+- **The A* heuristic head-node rule.** Each line-graph node keeps its real edge's *head* node's
+  coordinates (where the edge ends), not its tail or a midpoint — because that's where you
+  physically are once you've finished traversing the edge, which is exactly where the heuristic
+  must be anchored to stay admissible: the remaining cost from wherever the search currently
+  stands can't be less than the straight-line distance from *there* to the destination divided by
+  `v_max`.
+- **Cost accounting.** An arc costs its destination edge's own travel time (the cost of *entering*
+  it); a route's very first edge is never entered via an arc, so a line-graph Dijkstra/A* distance
+  is the true route cost *minus* the source edge's own weight. `source_edge_weight` gives that
+  back, for a total comparable to a node-graph Dijkstra between the same two real nodes.
+
+Tested with unit tests on hand-built junctions (bans, `only_*` restrictions, U-turn penalties),
+a `hypothesis` property test proving an *unrestricted* line graph reproduces the exact same cost
+as computing the same route directly on the node graph (source edge's weight, plus the networkx
+shortest path in between, plus target edge's weight — the oracle, as elsewhere in this project),
+and golden tests on the Verona fixture.
+
+### Benchmark: line graph size and cost
+
+`scripts/benchmark_line_graph.py` fetches real restrictions and builds both graphs for the full
+Verona network:
+
+```
+Node graph:  41,460 nodes, 91,074 edges
+Line graph:  91,758 nodes, 230,003 edges  (2.21x the node count)
+Fetched 5,670 restriction relations, resolved 2,559 to graph edges (45%)
+```
+
+| Graph | Algorithm | Mean wall time (ms) |
+|---|---|---|
+| Node graph | Dijkstra | 13.5 |
+| Line graph | Dijkstra | 38.4 |
+| Line graph | A* | 44.8 |
+
+The node-count ratio (2.2x) is lower than CLAUDE.md's architecture notes anticipated (3-4x) —
+Verona's street network is dense enough that its average node degree is higher than that estimate
+assumed, so each node's out-edges (which become line-graph nodes) are fewer relative to the node
+count than in a sparser network. Dijkstra on the line graph takes ~2.8x as long as on the node
+graph, roughly tracking its larger size; A* doesn't recover its usual settled-node advantage here
+for the same pure-Python overhead reason noted in the routing-core benchmark above. The ~45%
+restriction-resolution rate reflects real via-way restrictions (skipped, see above) and relations
+referring to ways/nodes osmnx simplified away — not a bug, but worth knowing before trusting turn
+restrictions are fully enforced on any given network.
 
 `src/router/core/` provides:
 
@@ -209,7 +277,7 @@ TomTom Traffic API and is subject to TomTom's terms of use.
 2. Graph layer — OSM download, caching, CSR adapter, test fixture
 3. Routing core — Dijkstra, A*, hypothesis + golden tests, benchmark
 4. Corridor — ellipse bound, Yen on the ellipse subgraph
-5. Traffic — TomTom client, probe sampling, matching, second pass *(this milestone)*
-6. Turn restrictions — line graph, turn penalties
+5. Traffic — TomTom client, probe sampling, matching, second pass
+6. Turn restrictions — line graph, turn penalties *(this milestone)*
 7. UI — Streamlit map with free-flow vs traffic-aware comparison
 8. Documentation and benchmarks
