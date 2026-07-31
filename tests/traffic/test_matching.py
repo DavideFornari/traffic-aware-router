@@ -7,7 +7,12 @@ positives, plus the boundary cases around both thresholds.
 
 import pytest
 
-from router.traffic.matching import bearing_deg, bearing_difference_deg, edge_matches_segment
+from router.traffic.matching import (
+    bearing_deg,
+    bearing_difference_deg,
+    edge_matches_segment,
+    local_bearing_deg,
+)
 
 
 def test_bearing_of_eastward_edge_is_90_degrees():
@@ -62,3 +67,33 @@ def test_bearing_tolerance_is_configurable():
 
 def test_rejects_a_degenerate_single_point_segment():
     assert not edge_matches_segment(0, 0, 100, 0, [(0, 0)])
+
+
+# A curved segment: east from (0,0) to (50,0), then a sharp bend north to
+# (50,50). Its overall start-to-end bearing is ~45 degrees (northeast), but
+# its LOCAL bearing near the start is 90 (due east) and near the end is 0
+# (due north) — nothing like the overall bearing at either end.
+CURVED_SEGMENT = [(0.0, 0.0), (50.0, 0.0), (50.0, 50.0)]
+
+
+def test_local_bearing_near_the_start_is_the_first_legs_bearing():
+    assert local_bearing_deg(CURVED_SEGMENT, 25.0, 0.0) == pytest.approx(90.0)
+
+
+def test_local_bearing_near_the_end_is_the_last_legs_bearing():
+    assert local_bearing_deg(CURVED_SEGMENT, 50.0, 25.0) == pytest.approx(0.0)
+
+
+def test_matches_an_edge_whose_bearing_agrees_with_the_curve_locally_but_not_overall():
+    # East-facing edge near the segment's start: local bearing (90) matches,
+    # even though the segment's overall bearing (~45) would put it right at
+    # the 30-degree default tolerance's edge — a whole-polyline bearing
+    # check would reject this valid match.
+    assert edge_matches_segment(0.0, 2.0, 50.0, 2.0, CURVED_SEGMENT)
+
+
+def test_rejects_an_edge_whose_bearing_only_agrees_with_the_curve_far_away():
+    # Horizontal (east/west) edge sitting near the segment's *end*, where
+    # the local bearing is 0 (north) — should not match, even though this
+    # edge's bearing (90) is close to the segment's overall bearing (~45).
+    assert not edge_matches_segment(48.0, 25.0, 52.0, 25.0, CURVED_SEGMENT)

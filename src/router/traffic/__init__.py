@@ -2,7 +2,12 @@
 
 from router.traffic.cache import TrafficCache
 from router.traffic.client import FlowSegment, TomTomAPIError, TomTomClient
-from router.traffic.matching import bearing_deg, bearing_difference_deg, edge_matches_segment
+from router.traffic.matching import (
+    bearing_deg,
+    bearing_difference_deg,
+    edge_matches_segment,
+    local_bearing_deg,
+)
 from router.traffic.pipeline import TrafficResult, apply_traffic
 from router.traffic.sampling import ProbePoint, sample_probe_points
 
@@ -17,5 +22,6 @@ __all__ = [
     "bearing_deg",
     "bearing_difference_deg",
     "edge_matches_segment",
+    "local_bearing_deg",
     "sample_probe_points",
 ]

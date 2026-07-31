@@ -48,6 +48,35 @@ def bearing_difference_deg(bearing1: float, bearing2: float) -> float:
     return min(diff, 360.0 - diff)
 
 
+def local_bearing_deg(
+    segment_coords_xy: list[tuple[float, float]], point_x: float, point_y: float
+) -> float:
+    """Bearing of `segment_coords_xy`'s local direction nearest `(point_x, point_y)`.
+
+    A TomTom segment can be long and curved; its overall start-to-end
+    bearing can differ sharply from its direction at the point actually
+    being matched (e.g. a segment that bends around a corner well past the
+    queried edge). `line.project` finds how far along the polyline the
+    closest point to `(point_x, point_y)` is; walking the cumulative vertex
+    distances to find which pair of vertices that falls between and using
+    just that pair's bearing gives the segment's *local* direction there,
+    which is what should be compared to the edge's own bearing.
+    """
+    line = LineString(segment_coords_xy)
+    target_distance = line.project(Point(point_x, point_y))
+
+    cumulative = 0.0
+    last = len(segment_coords_xy) - 2
+    for i in range(last + 1):
+        x1, y1 = segment_coords_xy[i]
+        x2, y2 = segment_coords_xy[i + 1]
+        cumulative += math.hypot(x2 - x1, y2 - y1)
+        if cumulative >= target_distance or i == last:
+            return bearing_deg(x1, y1, x2, y2)
+
+    raise AssertionError("unreachable: the loop above always returns by i == last")
+
+
 def edge_matches_segment(
     edge_x1: float,
     edge_y1: float,
@@ -61,20 +90,21 @@ def edge_matches_segment(
 
     Two checks, both required: the edge's midpoint must fall within
     `buffer_m` of the segment polyline (geometric overlap), and the edge's
-    bearing must be within `max_bearing_diff_deg` of the segment's overall
-    bearing (direction check — see module docstring for why this matters).
+    bearing must be within `max_bearing_diff_deg` of the segment's *local*
+    bearing at the point nearest the edge's midpoint (direction check — see
+    module docstring for why this matters, and `local_bearing_deg` for why
+    it's the local bearing and not the segment's overall one).
     """
     if len(segment_coords_xy) < 2:
         return False
 
     segment_line = LineString(segment_coords_xy)
-    edge_mid = Point((edge_x1 + edge_x2) / 2, (edge_y1 + edge_y2) / 2)
+    edge_mid_x, edge_mid_y = (edge_x1 + edge_x2) / 2, (edge_y1 + edge_y2) / 2
+    edge_mid = Point(edge_mid_x, edge_mid_y)
     if segment_line.distance(edge_mid) > buffer_m:
         return False
 
     edge_bearing = bearing_deg(edge_x1, edge_y1, edge_x2, edge_y2)
-    seg_start_x, seg_start_y = segment_coords_xy[0]
-    seg_end_x, seg_end_y = segment_coords_xy[-1]
-    segment_bearing = bearing_deg(seg_start_x, seg_start_y, seg_end_x, seg_end_y)
+    segment_bearing = local_bearing_deg(segment_coords_xy, edge_mid_x, edge_mid_y)
 
     return bearing_difference_deg(edge_bearing, segment_bearing) <= max_bearing_diff_deg
