@@ -1,0 +1,26 @@
+# Environments
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Secrets
+.env
+*.env
+
+# Cached OSM graphs and traffic data (regenerated, not committed)
+data/cache/
+*.graphml
+*.osm.pbf
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Test / coverage
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
