@@ -13,6 +13,7 @@ import pytest
 
 from router.core.astar import astar
 from router.core.dijkstra import dijkstra, reconstruct_path
+from router.core.yen import yen_k_shortest_paths
 from router.graph.csr import build_csr
 from router.graph.prepare import max_speed_kph, prepare_graph
 
@@ -69,3 +70,20 @@ def test_reconstructed_path_starts_and_ends_correctly(prepared_graph):
     assert path[0] == source
     assert path[-1] == target
     assert len(path) >= 2
+
+
+def test_yen_first_path_matches_dijkstra_on_the_fixture(prepared_graph):
+    csr = build_csr(prepared_graph)
+    source = int(np.searchsorted(csr.node_ids, SOURCE_ID))
+    target = int(np.searchsorted(csr.node_ids, TARGET_ID))
+
+    dij = dijkstra(csr.indptr, csr.indices, csr.weights, source=source, target=target)
+    k_paths = yen_k_shortest_paths(csr.indptr, csr.indices, csr.weights, source, target, k=4)
+
+    assert len(k_paths) >= 1
+    assert k_paths[0][1] == pytest.approx(dij.dist[target], rel=1e-6)
+    costs = [cost for _, cost in k_paths]
+    assert costs == sorted(costs)
+    # k loopless alternatives should differ from each other.
+    paths = [tuple(path) for path, _ in k_paths]
+    assert len(paths) == len(set(paths))

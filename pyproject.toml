@@ -28,6 +28,11 @@ dev = [
     "ruff>=0.6",
     "pre-commit>=3",
 ]
+# Standalone map rendering for debug scripts; the Streamlit UI (Milestone 7)
+# will use streamlit-folium, which depends on this same folium package.
+viz = [
+    "folium>=0.15",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

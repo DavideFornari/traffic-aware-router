@@ -10,9 +10,10 @@ representation, with `networkx` used only as a correctness oracle in tests.
 
 ## Status
 
-**Milestone 3 — routing core.** Dijkstra and A* are implemented from scratch over CSR arrays,
-verified against networkx (property-based tests with `hypothesis`, plus golden tests on the
-committed Verona extract) and benchmarked on the full Verona network. See the roadmap below.
+**Milestone 4 — corridor.** The ellipse time-budget bound, Yen's k-shortest-paths on the ellipse
+subgraph, and the buffered union that recovers structurally different alternatives are in place,
+tested against the committed Verona extract and visualised with a debug map script. See the
+roadmap below.
 
 ## Modelling assumptions
 
@@ -96,6 +97,45 @@ work saved. A C-level implementation (numpy-vectorised or `scipy.sparse.csgraph`
 likely close both gaps; documented here rather than papered over, since being able to explain a
 benchmark's limits is as important to this project as the number itself.
 
+`src/router/core/` also provides `yen_k_shortest_paths` — Yen's algorithm for the k shortest
+loopless paths, built entirely on `dijkstra`. "Removing" a node or edge for a spur search needs no
+change to `dijkstra` itself: it's done by copying the weight array and setting the relevant
+entries to infinity, which `dijkstra` already treats as "no edge". Checked against
+`networkx.shortest_simple_paths` (matching costs for the k cheapest loopless paths; ties can
+break differently between implementations, so costs — not paths — are compared) and against a
+golden test on the Verona fixture.
+
+### Corridor (`src/router/corridor/`)
+
+Implements CLAUDE.md's "corridor" step of the two-pass design: a full-graph Dijkstra bounds an
+ellipse, Yen then runs only on the (much smaller) ellipse subgraph, and the buffered union of its
+k paths is folded back in.
+
+- `ellipse_l_max(t_star, epsilon, v_max)` — the major-axis bound `(1 + epsilon) * t_star *
+  v_max`. Any route with free-flow time up to `(1 + epsilon) * t_star` covers at most this many
+  metres, since no edge exceeds `v_max` (time bounds distance). Deliberately sized from the
+  *time* budget, not `(1 + epsilon)` times the shortest *distance* — a time-optimal route (e.g. a
+  ring road) can be far longer in metres than the distance-shortest path, so a distance-based
+  bound could wrongly exclude it.
+- `in_ellipse` — the focal definition of an ellipse (sum of distances to the two foci at most
+  `l_max`) applied directly to projected node coordinates, needing no center, rotation, or
+  semi-axis lengths.
+- `extract_subgraph` — induced sub-CSR from a boolean node mask, with the index remapping back to
+  the full graph, used first to restrict Yen to the ellipse and then to build the final corridor.
+- `buffered_path_union` / `nodes_in_polygon` — a `shapely` buffer around the union of Yen's k
+  paths, and a vectorised (`shapely.contains_xy`) test for which full-graph nodes it covers —
+  this is what recovers a parallel street one block over that the ellipse alone would miss.
+- `build_corridor` — wires the above into one call: first-pass Dijkstra for `t_star`, ellipse
+  subgraph, Yen on it, buffer union, final corridor subgraph. Also returns the ellipse mask and
+  buffer polygon for debugging.
+
+Tested with unit tests on hand-built geometry/graphs for each piece, plus a golden test running
+the full pipeline on the Verona fixture. `scripts/debug_corridor.py` (needs the `viz` extra: `pip
+install -e ".[viz]"`) renders the corridor on an interactive map — candidate paths, the corridor
+subgraph (coloured by whether the ellipse or the buffer pulled a node in), and the buffer polygon
+— since this geometry is exactly the kind of thing that's easy to get subtly wrong (wrong CRS, an
+inverted containment test) in a way unit tests on synthetic coordinates can miss.
+
 ## Development
 
 ```bash
@@ -119,8 +159,8 @@ TomTom Traffic API and is subject to TomTom's terms of use.
 
 1. Scaffolding
 2. Graph layer — OSM download, caching, CSR adapter, test fixture
-3. Routing core — Dijkstra, A*, hypothesis + golden tests, benchmark *(this milestone)*
-4. Corridor — ellipse bound, Yen on the ellipse subgraph
+3. Routing core — Dijkstra, A*, hypothesis + golden tests, benchmark
+4. Corridor — ellipse bound, Yen on the ellipse subgraph *(this milestone)*
 5. Traffic — TomTom client, probe sampling, matching, second pass
 6. Turn restrictions — line graph, turn penalties
 7. UI — Streamlit map with free-flow vs traffic-aware comparison

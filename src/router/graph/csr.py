@@ -30,6 +30,12 @@ class CSRGraph:
     every source-graph node carries `lat`/`lon` attributes — they exist only
     to feed the A* heuristic (Milestone 3), which needs great-circle
     distance and therefore unprojected coordinates.
+
+    `x`/`y` are `None` unless every node carries `x`/`y` attributes; they are
+    whatever CRS was on the graph when `build_csr` ran. The corridor module
+    (Milestone 4) requires these to be projected metres — call `build_csr`
+    after `prepare_graph`, never on a raw unprojected graph, or the ellipse
+    and buffer geometry will be computed in degrees.
     """
 
     indptr: np.ndarray
@@ -39,6 +45,8 @@ class CSRGraph:
     edge_keys: list[tuple[int, int, int]]
     lat: np.ndarray | None = None
     lon: np.ndarray | None = None
+    x: np.ndarray | None = None
+    y: np.ndarray | None = None
 
     @property
     def n_nodes(self) -> int:
@@ -92,10 +100,15 @@ def build_csr(graph: nx.MultiDiGraph, weight: str = "travel_time") -> CSRGraph:
             pos += 1
     indptr[n] = pos
 
-    lat = lon = None
-    if all("lat" in graph.nodes[osmid] and "lon" in graph.nodes[osmid] for osmid in node_ids):
-        lat = np.array([graph.nodes[osmid]["lat"] for osmid in node_ids], dtype=np.float64)
-        lon = np.array([graph.nodes[osmid]["lon"] for osmid in node_ids], dtype=np.float64)
+    def _node_arrays(attr_a: str, attr_b: str) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
+        if not all(attr_a in graph.nodes[i] and attr_b in graph.nodes[i] for i in node_ids):
+            return None, None
+        a = np.array([graph.nodes[osmid][attr_a] for osmid in node_ids], dtype=np.float64)
+        b = np.array([graph.nodes[osmid][attr_b] for osmid in node_ids], dtype=np.float64)
+        return a, b
+
+    lat, lon = _node_arrays("lat", "lon")
+    x, y = _node_arrays("x", "y")
 
     return CSRGraph(
         indptr=indptr,
@@ -105,4 +118,6 @@ def build_csr(graph: nx.MultiDiGraph, weight: str = "travel_time") -> CSRGraph:
         edge_keys=edge_keys,
         lat=lat,
         lon=lon,
+        x=x,
+        y=y,
     )

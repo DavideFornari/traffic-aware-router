@@ -16,6 +16,9 @@ cache/
 !tests/fixtures/*.graphml
 *.osm.pbf
 
+# Debug script output (scripts/debug_corridor.py)
+corridor_debug.html
+
 # Editors / OS
 .vscode/
 .idea/
