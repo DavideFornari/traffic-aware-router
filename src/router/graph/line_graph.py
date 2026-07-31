@@ -21,8 +21,13 @@ Dijkstra between the same two real nodes.
 
 from __future__ import annotations
 
-import networkx as nx
+import math
 
+import networkx as nx
+import numpy as np
+
+from router.core.dijkstra import dijkstra, reconstruct_path
+from router.graph.csr import build_csr
 from router.graph.restrictions import TurnRestriction
 
 EdgeKey = tuple[int, int, int]
@@ -112,3 +117,75 @@ def find_line_node(line_graph: nx.MultiDiGraph, edge_key: EdgeKey) -> int | None
 def source_edge_weight(line_graph: nx.MultiDiGraph, source_node_id: int) -> float:
     """The source real edge's own travel time (see module docstring)."""
     return line_graph.nodes[source_node_id]["weight"]
+
+
+def route_on_line_graph(
+    line_graph: nx.MultiDiGraph,
+    origin_real_node: int,
+    destination_real_node: int,
+    weight: str = "weight",
+) -> tuple[list[int], float] | None:
+    """Shortest real-node route on a line graph, respecting whatever
+    restrictions/penalties `build_line_graph` already baked into its arcs.
+
+    A line graph has no notion of "the origin node" or "the destination
+    node" — only directed real edges. Routing point-to-point therefore
+    means: any edge leaving `origin_real_node` is a valid first move, and
+    any edge arriving at `destination_real_node` is a valid last move: a
+    multi-source, multi-target search over the candidates on both ends.
+
+    Implemented with a single ordinary (single-source) Dijkstra run on the
+    existing, unmodified core: a virtual super-source node is appended to
+    the line graph's CSR arrays, with an edge to every candidate first-move
+    line-node weighted by *that edge's own travel time* — which is exactly
+    what `source_edge_weight` would otherwise need adding back afterwards
+    (see the module docstring's "cost accounting" note), so here it's baked
+    into the search instead. `target=None` runs Dijkstra to completion, and
+    the best of every candidate last-move line-node's distance is the
+    answer — no separate super-sink needed, since CSR rows are only cheap
+    to extend by *appending* a new one, not by inserting an edge into an
+    existing node's row.
+
+    Returns `(real_node_path, total_cost)`, or `None` if unreachable.
+    """
+    csr = build_csr(line_graph, weight=weight)
+    m = csr.n_nodes
+    # `build_line_graph` assigns node ids 0..m-1 by construction, and
+    # `build_csr` sorts node ids — so for this specific graph shape the CSR
+    # index of a line-graph node always equals the node's own id. Asserted
+    # here because `route_on_line_graph` silently gives wrong answers if
+    # that ever stops holding (e.g. if `build_line_graph` starts skipping
+    # ids or using non-sequential ones).
+    assert np.array_equal(csr.node_ids, np.arange(m)), (
+        "route_on_line_graph assumes line-graph node ids are exactly 0..m-1"
+    )
+
+    starts: list[int] = []
+    ends: list[int] = []
+    for node_id, data in line_graph.nodes(data=True):
+        edge_u, edge_v, _ = data["edge_key"]
+        if edge_u == origin_real_node:
+            starts.append(node_id)
+        if edge_v == destination_real_node:
+            ends.append(node_id)
+
+    if not starts or not ends:
+        return None
+
+    super_source = m
+    start_weights = np.array([line_graph.nodes[s]["weight"] for s in starts], dtype=np.float64)
+    aug_indptr = np.append(csr.indptr, csr.indptr[-1] + len(starts))
+    aug_indices = np.concatenate([csr.indices, np.array(starts, dtype=np.int64)])
+    aug_weights = np.concatenate([csr.weights, start_weights])
+
+    result = dijkstra(aug_indptr, aug_indices, aug_weights, source=super_source)
+
+    best_end = min(ends, key=lambda e: result.dist[e])
+    if math.isinf(result.dist[best_end]):
+        return None
+
+    line_path = reconstruct_path(result.predecessor, super_source, best_end)[1:]
+    real_path = [line_graph.nodes[line_path[0]]["edge_key"][0]]
+    real_path.extend(line_graph.nodes[n]["edge_key"][1] for n in line_path)
+
+    return real_path, float(result.dist[best_end])

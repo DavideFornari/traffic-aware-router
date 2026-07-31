@@ -62,12 +62,16 @@ def build_corridor(
     epsilon: float = DEFAULT_EPSILON,
     k: int = DEFAULT_K,
     buffer_m: float = DEFAULT_BUFFER_M,
+    edge_keys: list[tuple[int, int, int]] | None = None,
 ) -> CorridorResult:
     """Build the traffic-sampling corridor between `origin` and `destination`.
 
     `x`/`y` must be projected metres (see `router.graph.csr.CSRGraph`'s
     docstring); `v_max` must be in the same distance/time units as
-    `weights` (metres and seconds, for OSM travel times).
+    `weights` (metres and seconds, for OSM travel times). `edge_keys`,
+    if given (e.g. `CSRGraph.edge_keys`), is carried through onto
+    `CorridorResult.subgraph.edge_keys` — needed to map the corridor back
+    onto real OSM edges, e.g. to apply turn restrictions on the second pass.
     """
     first_pass = dijkstra(indptr, indices, weights, source=origin, target=destination)
     t_star = float(first_pass.dist[destination])
@@ -98,7 +102,7 @@ def build_corridor(
     buffer_mask = nodes_in_polygon(x, y, polygon)
 
     corridor_mask = ellipse_mask | buffer_mask
-    corridor_sub = extract_subgraph(indptr, indices, weights, corridor_mask)
+    corridor_sub = extract_subgraph(indptr, indices, weights, corridor_mask, edge_keys)
 
     return CorridorResult(
         subgraph=corridor_sub,

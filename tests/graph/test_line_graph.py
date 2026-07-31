@@ -8,6 +8,7 @@ from router.graph.csr import build_csr
 from router.graph.line_graph import (
     build_line_graph,
     find_line_node,
+    route_on_line_graph,
     source_edge_weight,
 )
 from router.graph.restrictions import TurnRestriction
@@ -118,3 +119,53 @@ def test_unrecognised_restriction_type_is_ignored():
     src = find_line_node(lg, (1, 100, 0))
     dst = find_line_node(lg, (100, 2, 0))
     assert lg.has_edge(src, dst)
+
+
+def test_route_on_line_graph_finds_the_cheapest_real_node_path():
+    lg = build_line_graph(_y_junction())
+    path, cost = route_on_line_graph(lg, origin_real_node=1, destination_real_node=2)
+    assert path == [1, 100, 2]
+    assert cost == pytest.approx(5.0 + 3.0)
+
+
+def test_route_on_line_graph_respects_a_ban_by_taking_a_different_real_edge():
+    g = _y_junction()
+    ban = TurnRestriction(
+        from_edge=(1, 100, 0), via_node=100, to_edge=(100, 2, 0), restriction_type="no_left_turn"
+    )
+    lg = build_line_graph(g, restrictions=[ban])
+
+    # node 2 is now unreachable from 1 (its only real in-edge is the banned turn).
+    assert route_on_line_graph(lg, origin_real_node=1, destination_real_node=2) is None
+    # node 3 is unaffected.
+    path, cost = route_on_line_graph(lg, origin_real_node=1, destination_real_node=3)
+    assert path == [1, 100, 3]
+    assert cost == pytest.approx(5.0 + 4.0)
+
+
+def test_route_on_line_graph_picks_the_cheapest_among_multiple_start_edges():
+    # Two parallel routes out of node 1: a direct fast edge, and a slower
+    # detour through 100 -- route_on_line_graph must consider both as
+    # candidate first moves and pick whichever gives the cheaper total.
+    g = nx.MultiDiGraph()
+    g.add_node(1, x=0, y=0, lat=0.0, lon=0.0)
+    g.add_node(100, x=5, y=0, lat=0.0, lon=0.00005)
+    g.add_node(2, x=10, y=0, lat=0.0, lon=0.0001)
+    g.add_edge(1, 2, key=0, osmid=99, travel_time=50.0)  # slow direct edge
+    g.add_edge(1, 100, key=0, osmid=10, travel_time=1.0)
+    g.add_edge(100, 2, key=0, osmid=20, travel_time=1.0)
+
+    lg = build_line_graph(g)
+    path, cost = route_on_line_graph(lg, origin_real_node=1, destination_real_node=2)
+    assert path == [1, 100, 2]
+    assert cost == pytest.approx(2.0)
+
+
+def test_route_on_line_graph_returns_none_when_origin_has_no_out_edges():
+    lg = build_line_graph(_y_junction())
+    assert route_on_line_graph(lg, origin_real_node=2, destination_real_node=3) is None
+
+
+def test_route_on_line_graph_returns_none_when_destination_has_no_in_edges():
+    lg = build_line_graph(_y_junction())
+    assert route_on_line_graph(lg, origin_real_node=1, destination_real_node=1) is None

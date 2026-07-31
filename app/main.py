@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import folium
+import numpy as np
 import osmnx as ox
 import streamlit as st
 from pyproj import Transformer
@@ -32,10 +33,12 @@ from app.helpers import (
 )
 from router.core.dijkstra import dijkstra, reconstruct_path
 from router.corridor.pipeline import build_corridor
+from router.corridor.restricted_second_pass import route_corridor_second_pass
 from router.graph.config import AreaConfig
 from router.graph.csr import build_csr
 from router.graph.download import load_graph
 from router.graph.prepare import max_speed_kph, prepare_graph
+from router.graph.restrictions import fetch_turn_restrictions, graph_bbox, resolve_restrictions
 from router.traffic.cache import TrafficCache
 from router.traffic.client import TomTomClient
 from router.traffic.pipeline import apply_traffic
@@ -54,7 +57,21 @@ def load_area(place: str):
     v_max_mps = max_speed_kph(graph) * 1000 / 3600
     to_wgs84 = Transformer.from_crs(graph.graph["crs"], "EPSG:4326", always_xy=True)
     to_projected = Transformer.from_crs("EPSG:4326", graph.graph["crs"], always_xy=True)
-    return csr, v_max_mps, to_wgs84, to_projected
+
+    # Fetched once per area (cached alongside the graph, not per query): turn
+    # restrictions apply to the traffic-aware second pass regardless of which
+    # origin/destination is queried against this area (CLAUDE.md P1 #1).
+    south, west, north, east = graph_bbox(raw)
+    try:
+        raw_restrictions = fetch_turn_restrictions(south, west, north, east)
+        restrictions = resolve_restrictions(graph, raw_restrictions)
+    except Exception:
+        # Overpass can time out or be unreachable; routing must still work
+        # with no turn restrictions applied, same spirit as the no-TomTom-key
+        # fallback — a missing external service degrades, never blocks.
+        restrictions = []
+
+    return csr, v_max_mps, to_wgs84, to_projected, restrictions
 
 
 def geocode(query: str) -> tuple[float, float] | None:
@@ -87,6 +104,19 @@ def render_result() -> None:
         st.warning(result["traffic_status"])
     else:
         st.info(result["traffic_status"])
+
+    if result["restriction_count"]:
+        if result["restrictions_applied"]:
+            st.caption(
+                f"Traffic-aware route respects {result['restriction_count']:,} known turn "
+                "restrictions in this area; the free-flow route above does not (it stays on "
+                "the plain road network to keep the first pass cheap — see README)."
+            )
+        else:
+            st.caption(
+                "Every route within the corridor was blocked by a turn restriction, so this "
+                "traffic-aware route ignores them too rather than failing outright."
+            )
 
     result_map = folium.Map(location=list(result["origin_latlon"]), zoom_start=13)
     folium.Marker(
@@ -173,8 +203,11 @@ def main() -> None:
                 else:
                     st.warning(f"Couldn't find {destination_query!r}.")
 
-    csr, v_max_mps, to_wgs84_t, to_projected_t = load_area(place)
-    st.caption(f"Loaded {csr.n_nodes:,} nodes, {csr.n_edges:,} edges.")
+    csr, v_max_mps, to_wgs84_t, to_projected_t, restrictions = load_area(place)
+    st.caption(
+        f"Loaded {csr.n_nodes:,} nodes, {csr.n_edges:,} edges, "
+        f"{len(restrictions):,} turn restrictions."
+    )
 
     picker_map = folium.Map(location=list(st.session_state.origin), zoom_start=13)
     folium.Marker(
@@ -230,13 +263,12 @@ def main() -> None:
                     v_max_mps,
                     epsilon=epsilon,
                     k=k,
+                    edge_keys=csr.edge_keys,
                 )
 
                 client = TomTomClient(api_key=api_key or None)
                 sub_x = csr.x[corridor.subgraph.sub_to_full]
                 sub_y = csr.y[corridor.subgraph.sub_to_full]
-                sub_origin = int(corridor.subgraph.full_to_sub[origin])
-                sub_destination = int(corridor.subgraph.full_to_sub[destination])
 
                 traffic = apply_traffic(
                     corridor.subgraph.indptr,
@@ -249,18 +281,56 @@ def main() -> None:
                     client,
                     cache=st.session_state.traffic_cache,
                 )
-                traffic_result = dijkstra(
-                    corridor.subgraph.indptr,
-                    corridor.subgraph.indices,
+
+                # Second pass: route on the corridor's line graph, so turn
+                # restrictions and turn penalties are respected (CLAUDE.md P1
+                # #1) — unlike the free-flow first pass above, which stays on
+                # the plain node graph since it only needs to cheaply bound
+                # the corridor, not be the final answer (see
+                # restricted_second_pass.py's module docstring).
+                origin_real_id = int(csr.node_ids[origin])
+                destination_real_id = int(csr.node_ids[destination])
+                second_pass = route_corridor_second_pass(
+                    corridor.subgraph,
+                    csr.node_ids[corridor.subgraph.sub_to_full],
+                    csr.lat[corridor.subgraph.sub_to_full],
+                    csr.lon[corridor.subgraph.sub_to_full],
+                    sub_x,
+                    sub_y,
                     traffic.adjusted_weights,
-                    sub_origin,
-                    sub_destination,
+                    origin_real_id,
+                    destination_real_id,
+                    restrictions=restrictions,
                 )
-                traffic_path_sub = reconstruct_path(
-                    traffic_result.predecessor, sub_origin, sub_destination
-                )
+                restrictions_applied = second_pass is not None
+                if second_pass is None:
+                    # Every route within the corridor is blocked by a turn
+                    # restriction (rare, but possible with a tight corridor) —
+                    # fall back to the unrestricted route rather than a dead
+                    # end, same resilience principle as the no-TomTom-key path.
+                    second_pass = route_corridor_second_pass(
+                        corridor.subgraph,
+                        csr.node_ids[corridor.subgraph.sub_to_full],
+                        csr.lat[corridor.subgraph.sub_to_full],
+                        csr.lon[corridor.subgraph.sub_to_full],
+                        sub_x,
+                        sub_y,
+                        traffic.adjusted_weights,
+                        origin_real_id,
+                        destination_real_id,
+                        restrictions=None,
+                    )
+
+                if second_pass is None:
+                    # Shouldn't happen — the corridor always contains the
+                    # free-flow route already confirmed reachable above — but
+                    # never crash on a routing edge case; report it instead.
+                    st.error("Could not compute a traffic-aware route within the corridor.")
+                    st.stop()
+
+                traffic_real_path, traffic_eta = second_pass
                 traffic_path_full = [
-                    int(corridor.subgraph.sub_to_full[i]) for i in traffic_path_sub
+                    int(np.searchsorted(csr.node_ids, real_id)) for real_id in traffic_real_path
                 ]
 
                 # Resolve everything to lat/lon (and plain values) now, at compute
@@ -299,13 +369,15 @@ def main() -> None:
                     "origin_latlon": st.session_state.origin,
                     "destination_latlon": st.session_state.destination,
                     "free_flow_eta": float(free_flow.dist[destination]),
-                    "traffic_eta": float(traffic_result.dist[sub_destination]),
+                    "traffic_eta": float(traffic_eta),
                     "free_flow_latlon": path_to_latlon(free_flow_path, csr.lat, csr.lon),
                     "traffic_latlon": path_to_latlon(traffic_path_full, csr.lat, csr.lon),
                     "corridor_edges_latlon": corridor_edges_latlon,
                     "live_edges_latlon": live_edges_latlon,
                     "traffic_status": traffic_summary(traffic),
                     "traffic_key_available": client.is_available,
+                    "restrictions_applied": restrictions_applied,
+                    "restriction_count": len(restrictions),
                 }
 
     render_result()

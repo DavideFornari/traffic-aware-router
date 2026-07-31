@@ -119,11 +119,32 @@ doesn't fetch or apply these.
   is the true route cost *minus* the source edge's own weight. `source_edge_weight` gives that
   back, for a total comparable to a node-graph Dijkstra between the same two real nodes.
 
-Tested with unit tests on hand-built junctions (bans, `only_*` restrictions, U-turn penalties),
-a `hypothesis` property test proving an *unrestricted* line graph reproduces the exact same cost
-as computing the same route directly on the node graph (source edge's weight, plus the networkx
-shortest path in between, plus target edge's weight — the oracle, as elsewhere in this project),
-and golden tests on the Verona fixture.
+- `route_on_line_graph` — a line graph has no notion of "the origin" or "the destination", only
+  directed real edges, so point-to-point routing means any edge leaving the origin is a valid
+  first move and any edge arriving at the destination is a valid last move: a multi-source,
+  multi-target search. Implemented as a *single* ordinary Dijkstra run on the unmodified core: a
+  virtual super-source node is appended to the line graph's CSR arrays with an edge to every
+  candidate first move, weighted by that edge's own travel time (which is what `source_edge_weight`
+  would otherwise need adding back afterwards — here it's baked into the search instead); the best
+  of every candidate last move's distance is the answer, no super-sink needed.
+
+Tested with unit tests on hand-built junctions (bans, `only_*` restrictions, U-turn penalties,
+`route_on_line_graph`'s multi-source/multi-target search), a `hypothesis` property test proving an
+*unrestricted* line graph reproduces the exact same cost as computing the same route directly on
+the node graph (the oracle, as elsewhere in this project — checked twice: once per real edge pair,
+once for `route_on_line_graph` against plain node-graph Dijkstra directly), and golden tests on the
+Verona fixture.
+
+**Wired into routing** (`src/router/corridor/restricted_second_pass.py`): `app/main.py` fetches
+and resolves restrictions once per area (degrading to no restrictions, not a crash, if Overpass is
+unreachable — the same resilience pattern as the no-TomTom-key path), and the traffic-aware second
+pass builds a line graph from just the corridor's (traffic-adjusted) edges and routes on it via
+`route_on_line_graph`. The free-flow first pass deliberately stays on the plain node graph — it
+only exists to cheaply bound the corridor, not to be a final answer, and turn-restriction-aware
+routing is strictly more expensive — so the two routes can, correctly, disagree about which turns
+are legal; the UI says so explicitly rather than leaving it a silent inconsistency. If every route
+within the corridor is blocked by a restriction (possible with a tight corridor), the second pass
+falls back to the unrestricted route rather than a dead end.
 
 Line graph size and cost vs the node graph, and how many real restrictions actually resolve, are
 in the [Benchmarks](#benchmarks) section below.
@@ -212,9 +233,13 @@ Modules:
   segment's directions differ by more than ~30 degrees, default). The bearing check specifically
   exists to catch **opposite-carriageway assignment**: a dual carriageway's two directions run a
   few metres apart, so distance alone can't tell them apart, but their directions are ~180
-  degrees apart, easily caught by bearing. Documented (but *not* handled — flagged as a real
-  limitation) failure mode: **vertically stacked roads** (bridges/underpasses), which look
-  identical in this 2D matching regardless of buffer or bearing.
+  degrees apart, easily caught by bearing. Compares against the segment's *local* bearing —
+  `local_bearing_deg` projects the edge's midpoint onto the polyline and uses just the nearest
+  pair of vertices' direction — not its overall start-to-end bearing, which can be badly wrong for
+  a long or curved TomTom segment (e.g. one that runs east past the queried edge, then bends
+  north: the overall bearing is ~45 degrees northeast, agreeing with neither leg). Documented (but
+  *not* handled — flagged as a real limitation) failure mode: **vertically stacked roads**
+  (bridges/underpasses), which look identical in this 2D matching regardless of buffer or bearing.
 - `TrafficCache` — TTL cache (default 5 minutes) keyed by projected coordinates quantised to a
   ~50m grid, so overlapping corridors or repeat queries reuse probes instead of spending quota.
 - `apply_traffic` — the second pass: samples the corridor, fetches/matches each probe, and
@@ -243,12 +268,18 @@ separate specifically so it's unit-testable without a running Streamlit session.
   sets), type a place name and hit Search (geocoded via `osmnx`/Nominatim), or paste `lat, lon`
   directly.
 - **Comparison**: free-flow ETA, traffic-aware ETA, and the delta, plus both routes drawn on one
-  map (solid blue vs dashed red) so the two are visually easy to tell apart.
+  map (solid blue vs dashed red) so the two are visually easy to tell apart. The traffic-aware
+  route also respects turn restrictions (see "Turn restrictions" above); a caption says so, and
+  says when it doesn't (every route in the corridor blocked by a restriction — rare, but handled).
 - **Corridor and live-data layers**: toggleable via the map's layer control, same idea as
   `scripts/debug_corridor.py` — the corridor subgraph the search actually considered, and which of
   its edges got real TomTom data (the rest silently kept their free-flow weight).
 - **No-key fallback, visibly**: with no TomTom key, a warning banner says so and both routes are
   identical, rather than the app silently pretending it had traffic data.
+- **Results persist across reruns**: computing a route resolves everything to plain data in
+  `st.session_state`, rendered by a function that runs on every rerun — not just the one where
+  "Compute route" was clicked — so moving a map pin or tweaking a slider afterwards doesn't wipe
+  the comparison off the screen.
 
 Verified by actually running the app — `streamlit.testing.v1.AppTest` executes `app/main.py`
 server-side (the officially supported way to test a Streamlit script without a browser) and was

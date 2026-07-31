@@ -65,8 +65,12 @@ Every commit leaves lint green, tests green, and the app runnable — no excepti
 src/router/core/       dijkstra.py, astar.py, yen.py, geometry.py — arrays only
 src/router/graph/      config.py, download.py (GraphML disk cache), prepare.py,
                        csr.py (node-graph adapter), restrictions.py (Overpass fetch +
-                       resolve), line_graph.py (turn-restriction adapter)
-src/router/corridor/   ellipse.py, subgraph.py, buffer.py, pipeline.py (build_corridor)
+                       resolve), line_graph.py (turn-restriction adapter +
+                       route_on_line_graph, a multi-source/multi-target query helper)
+src/router/corridor/   ellipse.py, subgraph.py (Subgraph optionally carries edge_keys),
+                       buffer.py, pipeline.py (build_corridor),
+                       restricted_second_pass.py (turn-restriction-aware second pass —
+                       builds a corridor-scoped line graph and routes on it)
 src/router/traffic/    client.py (TomTom), sampling.py, matching.py, cache.py,
                        pipeline.py (apply_traffic)
 app/                   main.py (Streamlit; all st.*/folium.* code), helpers.py (pure,
@@ -101,19 +105,29 @@ Any work touching the TomTom client starts by re-checking docs.tomtom.com — do
 Prioritised; each item is safe to pick up independently. Re-run the relevant benchmark or
 tests after each, and update README if behaviour or numbers change.
 
-**P1 — functional gaps**
-1. **Turn restrictions are built but not wired in.** `build_line_graph` is complete and
-   tested, but neither `corridor/pipeline.py` nor `app/main.py` uses it — user-facing
-   routing ignores restrictions. Integrate (fetch+resolve at area load, route the second
-   pass on the line graph) or state the gap prominently in README's limitations. Verified:
-   no import of `line_graph` outside `src/router/graph/` and its tests/benchmark.
-2. **Bearing check uses the whole polyline, not the local bearing.** The original spec
-   says local bearing; `matching.py::edge_matches_segment` compares against the segment's
-   overall start→end bearing, which misjudges long curved TomTom segments. Fix: bearing of
-   the polyline sub-segment nearest the edge midpoint. Add a curved-segment test case.
-3. **Route results vanish on any Streamlit rerun.** `app/main.py` gates results behind
-   `st.button(...)`, so a map click or widget change erases the computed comparison.
-   Persist the last result in `st.session_state` and re-render it.
+**Done (2026-08-01, same-day follow-up session)** — all three former P1 items:
+1. ~~Turn restrictions built but not wired in~~ — fixed. `line_graph.py` gained
+   `route_on_line_graph` (multi-source/multi-target Dijkstra via a virtual super-source
+   node appended to the CSR arrays — no change to the core `dijkstra` itself); new
+   `corridor/restricted_second_pass.py` builds a small line graph from just the corridor's
+   (traffic-adjusted) edges and routes on it. `app/main.py`'s `load_area` now fetches +
+   resolves restrictions once per area (degrades to `[]` on Overpass failure, same
+   resilience pattern as the no-TomTom-key path); the second pass uses them, the free-flow
+   first pass deliberately doesn't (stated in-app and in README — see "Turn restrictions").
+   Tested with the full triad (unit/property/golden) on `route_on_line_graph` and on the
+   corridor integration; verified end-to-end with `AppTest` (2,559 restrictions applied on
+   Verona, zero exceptions).
+2. ~~Bearing check used the whole polyline~~ — fixed. `matching.py` gained
+   `local_bearing_deg`: projects onto the polyline, finds the nearest vertex pair, uses
+   just that pair's bearing. Verified the fix changes real outcomes (a curved-segment case
+   that the old whole-polyline check would wrongly reject now correctly matches).
+3. ~~Streamlit results vanished on rerun~~ — fixed. `app/main.py` resolves everything to
+   plain lat/lon in `st.session_state.result` at compute time; a new `render_result()` runs
+   on every rerun, not just the one where the button was clicked.
+
+Also fixed in passing: `.pre-commit-config.yaml` pinned ruff at `v0.6.9` while the venv/CI
+ran `0.16.1` — the two versions disagreed on import-block ordering and were flip-flopping
+two files' formatting back and forth on every commit. Pinned to `v0.16.1` to match.
 
 **P2 — performance (measure before/after; scripts exist)**
 4. `app/helpers.py::nearest_node` is a pure-Python loop over all ~41k nodes with a

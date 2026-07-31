@@ -18,7 +18,12 @@ from hypothesis import strategies as st
 
 from router.core.dijkstra import dijkstra
 from router.graph.csr import build_csr
-from router.graph.line_graph import build_line_graph, find_line_node, source_edge_weight
+from router.graph.line_graph import (
+    build_line_graph,
+    find_line_node,
+    route_on_line_graph,
+    source_edge_weight,
+)
 
 NODE_IDS = st.integers(min_value=0, max_value=7)
 WEIGHTS = st.floats(min_value=0.1, max_value=50.0, allow_nan=False, allow_infinity=False)
@@ -91,3 +96,52 @@ def test_unrestricted_line_graph_cost_matches_node_graph_oracle(data):
     expected = g.edges[u, v, 0]["travel_time"] + middle_cost + g.edges[w, x, 0]["travel_time"]
 
     assert math.isclose(total_cost, expected, rel_tol=1e-9, abs_tol=1e-9)
+
+
+@st.composite
+def random_digraphs_with_two_nodes(draw):
+    edges = draw(
+        st.lists(
+            st.tuples(NODE_IDS, NODE_IDS, WEIGHTS).filter(lambda e: e[0] != e[1]),
+            min_size=0,
+            max_size=20,
+            unique_by=lambda e: (e[0], e[1]),
+        )
+    )
+    origin, destination = draw(st.tuples(NODE_IDS, NODE_IDS).filter(lambda p: p[0] != p[1]))
+    return edges, origin, destination
+
+
+@given(random_digraphs_with_two_nodes())
+@settings(max_examples=150)
+def test_route_on_line_graph_matches_node_graph_dijkstra_when_unrestricted(data):
+    """`route_on_line_graph` with no restrictions must reproduce the exact
+    same origin-to-destination cost as plain node-graph Dijkstra — the real
+    oracle here, since that's a completely independent (and separately
+    property-tested, see test_dijkstra_property.py) implementation of the
+    same "shortest path between two real nodes" question `route_on_line_graph`
+    answers by a structurally different route (through a line graph).
+    """
+    edges, origin, destination = data
+
+    g = nx.MultiDiGraph()
+    g.add_nodes_from(range(8))
+    _add_coords(g)
+    for a, b, wt in edges:
+        g.add_edge(a, b, travel_time=wt, osmid=0)
+
+    node_csr = build_csr(g, weight="travel_time")
+    node_result = dijkstra(
+        node_csr.indptr, node_csr.indices, node_csr.weights, source=origin, target=destination
+    )
+
+    line_graph = build_line_graph(g, weight="travel_time")
+    line_route = route_on_line_graph(line_graph, origin, destination)
+
+    if math.isinf(node_result.dist[destination]):
+        assert line_route is None
+        return
+
+    assert line_route is not None
+    _, line_cost = line_route
+    assert math.isclose(line_cost, node_result.dist[destination], rel_tol=1e-9, abs_tol=1e-9)
