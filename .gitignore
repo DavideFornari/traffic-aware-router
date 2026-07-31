@@ -11,7 +11,9 @@ __pycache__/
 
 # Cached OSM graphs and traffic data (regenerated, not committed)
 data/cache/
+cache/
 *.graphml
+!tests/fixtures/*.graphml
 *.osm.pbf
 
 # Editors / OS

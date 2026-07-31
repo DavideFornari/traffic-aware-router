@@ -13,7 +13,13 @@ authors = [{ name = "Davide Fornari" }]
 
 # Runtime dependencies are added milestone by milestone, alongside the code
 # that first needs them, so `make venv` stays fast and failures stay scoped.
-dependencies = []
+dependencies = [
+    "osmnx>=1.9",
+    "networkx>=3.2",
+    "shapely>=2.0",
+    "pyproj>=3.6",
+    "numpy>=1.26",
+]
 
 [project.optional-dependencies]
 dev = [

@@ -10,8 +10,10 @@ representation, with `networkx` used only as a correctness oracle in tests.
 
 ## Status
 
-**Milestone 1 — scaffolding.** Repo layout, dependency management, linting, and CI are in place.
-No graph loading, routing, or traffic code yet — see the roadmap below.
+**Milestone 2 — graph layer.** OSM download with disk caching, projection to a metric CRS,
+free-flow speed/travel-time imputation, and the CSR adapter that the routing core will consume
+are in place, tested against a small committed Verona extract. No routing algorithms yet — see
+the roadmap below.
 
 ## Modelling assumptions
 
@@ -40,6 +42,23 @@ src/router/corridor/   ellipse bound, k-paths, subgraph extraction
 app/                   Streamlit UI
 ```
 
+`src/router/graph/` currently provides:
+
+- `AreaConfig` / `verona()` — the area to route on (OSM place name or bbox), never hardcoded
+  past this config object.
+- `load_graph` — downloads via osmnx and caches the raw extract to disk as GraphML, keyed by a
+  hash of the area config, so repeat runs are instant and offline.
+- `prepare_graph` — projects to the area's UTM zone and imputes free-flow speeds/travel times via
+  `osmnx.add_edge_speeds` / `add_edge_travel_times`. Missing `maxspeed` is filled with the mean
+  speed per highway type, which is optimistic for residential streets.
+- `build_csr` — converts any weighted `networkx.MultiDiGraph` (OSM-derived or hand-built) into
+  the CSR arrays (`indptr`, `indices`, `weights`) the routing core will operate on; parallel
+  edges collapse to their minimum-weight edge.
+
+A small extract around Piazza Bra, Verona (`tests/fixtures/verona_center.graphml`, 66 nodes, 126
+edges, © OpenStreetMap contributors, ODbL) is committed as a test fixture and exercised
+end-to-end by the golden tests.
+
 ## Development
 
 ```bash
@@ -61,8 +80,8 @@ TomTom Traffic API and is subject to TomTom's terms of use.
 
 ## Roadmap
 
-1. Scaffolding *(this milestone)*
-2. Graph layer — OSM download, caching, CSR adapter, test fixture
+1. Scaffolding
+2. Graph layer — OSM download, caching, CSR adapter, test fixture *(this milestone)*
 3. Routing core — Dijkstra, A*, hypothesis + golden tests, benchmark
 4. Corridor — ellipse bound, Yen on the ellipse subgraph
 5. Traffic — TomTom client, probe sampling, matching, second pass
