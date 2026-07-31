@@ -65,6 +65,63 @@ def geocode(query: str) -> tuple[float, float] | None:
         return None
 
 
+def render_result() -> None:
+    """Render the last computed route comparison, if any.
+
+    Called on every rerun (not just right after "Compute route" is clicked),
+    reading only `st.session_state.result` — plain lat/lon data, not `csr`/
+    `corridor` objects — so a map click or widget tweak afterwards doesn't
+    erase the comparison the way gating everything behind the button did.
+    """
+    result = st.session_state.get("result")
+    if result is None:
+        return
+
+    st.subheader("Comparison")
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("Free-flow ETA", format_duration(result["free_flow_eta"]))
+    metric_cols[1].metric("Traffic-aware ETA", format_duration(result["traffic_eta"]))
+    metric_cols[2].metric("Delta", format_delta(result["traffic_eta"] - result["free_flow_eta"]))
+
+    if not result["traffic_key_available"]:
+        st.warning(result["traffic_status"])
+    else:
+        st.info(result["traffic_status"])
+
+    result_map = folium.Map(location=list(result["origin_latlon"]), zoom_start=13)
+    folium.Marker(
+        result["origin_latlon"], tooltip="Origin", icon=folium.Icon(color="green")
+    ).add_to(result_map)
+    folium.Marker(
+        result["destination_latlon"], tooltip="Destination", icon=folium.Icon(color="red")
+    ).add_to(result_map)
+
+    corridor_layer = folium.FeatureGroup(name="Corridor")
+    for start, end in result["corridor_edges_latlon"]:
+        folium.PolyLine([start, end], color="#999999", weight=1, opacity=0.4).add_to(corridor_layer)
+    corridor_layer.add_to(result_map)
+
+    if result["live_edges_latlon"]:
+        live_layer = folium.FeatureGroup(name="Live traffic data")
+        for start, end in result["live_edges_latlon"]:
+            folium.PolyLine([start, end], color="#e6a817", weight=4, opacity=0.8).add_to(live_layer)
+        live_layer.add_to(result_map)
+
+    folium.PolyLine(
+        result["free_flow_latlon"], color="#1f77b4", weight=5, tooltip="Free-flow route"
+    ).add_to(result_map)
+    folium.PolyLine(
+        result["traffic_latlon"],
+        color="#d62728",
+        weight=3,
+        dash_array="6",
+        tooltip="Traffic-aware route",
+    ).add_to(result_map)
+
+    folium.LayerControl().add_to(result_map)
+    st_folium(result_map, height=500, width=None, returned_objects=[])
+
+
 def main() -> None:
     st.title("Traffic-aware router")
     st.caption(
@@ -150,126 +207,108 @@ def main() -> None:
     if parsed_destination:
         st.session_state.destination = parsed_destination
 
-    if not st.button("Compute route", type="primary"):
-        return
+    if st.button("Compute route", type="primary"):
+        origin = nearest_node(csr.lat, csr.lon, st.session_state.origin)
+        destination = nearest_node(csr.lat, csr.lon, st.session_state.destination)
+        if origin == destination:
+            st.error("Origin and destination snapped to the same graph node — pick farther apart.")
+        else:
+            free_flow = dijkstra(csr.indptr, csr.indices, csr.weights, origin, destination)
+            if math.isinf(free_flow.dist[destination]):
+                st.error("No route exists between origin and destination on this network.")
+            else:
+                free_flow_path = reconstruct_path(free_flow.predecessor, origin, destination)
 
-    origin = nearest_node(csr.lat, csr.lon, st.session_state.origin)
-    destination = nearest_node(csr.lat, csr.lon, st.session_state.destination)
-    if origin == destination:
-        st.error("Origin and destination snapped to the same graph node — pick farther apart.")
-        return
+                corridor = build_corridor(
+                    csr.indptr,
+                    csr.indices,
+                    csr.weights,
+                    csr.x,
+                    csr.y,
+                    origin,
+                    destination,
+                    v_max_mps,
+                    epsilon=epsilon,
+                    k=k,
+                )
 
-    free_flow = dijkstra(csr.indptr, csr.indices, csr.weights, origin, destination)
-    if math.isinf(free_flow.dist[destination]):
-        st.error("No route exists between origin and destination on this network.")
-        return
-    free_flow_path = reconstruct_path(free_flow.predecessor, origin, destination)
+                client = TomTomClient(api_key=api_key or None)
+                sub_x = csr.x[corridor.subgraph.sub_to_full]
+                sub_y = csr.y[corridor.subgraph.sub_to_full]
+                sub_origin = int(corridor.subgraph.full_to_sub[origin])
+                sub_destination = int(corridor.subgraph.full_to_sub[destination])
 
-    corridor = build_corridor(
-        csr.indptr,
-        csr.indices,
-        csr.weights,
-        csr.x,
-        csr.y,
-        origin,
-        destination,
-        v_max_mps,
-        epsilon=epsilon,
-        k=k,
-    )
+                traffic = apply_traffic(
+                    corridor.subgraph.indptr,
+                    corridor.subgraph.indices,
+                    corridor.subgraph.weights,
+                    sub_x,
+                    sub_y,
+                    lambda x, y: to_wgs84_t.transform(x, y)[::-1],
+                    lambda lat, lon: to_projected_t.transform(lon, lat),
+                    client,
+                    cache=st.session_state.traffic_cache,
+                )
+                traffic_result = dijkstra(
+                    corridor.subgraph.indptr,
+                    corridor.subgraph.indices,
+                    traffic.adjusted_weights,
+                    sub_origin,
+                    sub_destination,
+                )
+                traffic_path_sub = reconstruct_path(
+                    traffic_result.predecessor, sub_origin, sub_destination
+                )
+                traffic_path_full = [
+                    int(corridor.subgraph.sub_to_full[i]) for i in traffic_path_sub
+                ]
 
-    client = TomTomClient(api_key=api_key or None)
-    sub_x = csr.x[corridor.subgraph.sub_to_full]
-    sub_y = csr.y[corridor.subgraph.sub_to_full]
-    sub_origin = int(corridor.subgraph.full_to_sub[origin])
-    sub_destination = int(corridor.subgraph.full_to_sub[destination])
+                # Resolve everything to lat/lon (and plain values) now, at compute
+                # time: the rendering below must survive later Streamlit reruns
+                # (e.g. a map click) without depending on `csr`/`corridor`, which
+                # would silently misindex if the area or corridor params change
+                # before the next "Compute route" click.
+                corridor_edges_latlon = []
+                for su in range(corridor.subgraph.n_nodes):
+                    full_u = int(corridor.subgraph.sub_to_full[su])
+                    for pos in range(
+                        corridor.subgraph.indptr[su], corridor.subgraph.indptr[su + 1]
+                    ):
+                        full_v = int(corridor.subgraph.sub_to_full[corridor.subgraph.indices[pos]])
+                        corridor_edges_latlon.append(
+                            (
+                                (float(csr.lat[full_u]), float(csr.lon[full_u])),
+                                (float(csr.lat[full_v]), float(csr.lon[full_v])),
+                            )
+                        )
 
-    traffic = apply_traffic(
-        corridor.subgraph.indptr,
-        corridor.subgraph.indices,
-        corridor.subgraph.weights,
-        sub_x,
-        sub_y,
-        lambda x, y: to_wgs84_t.transform(x, y)[::-1],
-        lambda lat, lon: to_projected_t.transform(lon, lat),
-        client,
-        cache=st.session_state.traffic_cache,
-    )
-    traffic_result = dijkstra(
-        corridor.subgraph.indptr,
-        corridor.subgraph.indices,
-        traffic.adjusted_weights,
-        sub_origin,
-        sub_destination,
-    )
-    traffic_path_sub = reconstruct_path(traffic_result.predecessor, sub_origin, sub_destination)
-    traffic_path_full = [int(corridor.subgraph.sub_to_full[i]) for i in traffic_path_sub]
+                live_edges_latlon = []
+                for pos in traffic.matched_edge_positions:
+                    su = source_node_of_position(corridor.subgraph.indptr, pos)
+                    sv = int(corridor.subgraph.indices[pos])
+                    full_u = int(corridor.subgraph.sub_to_full[su])
+                    full_v = int(corridor.subgraph.sub_to_full[sv])
+                    live_edges_latlon.append(
+                        (
+                            (float(csr.lat[full_u]), float(csr.lon[full_u])),
+                            (float(csr.lat[full_v]), float(csr.lon[full_v])),
+                        )
+                    )
 
-    st.subheader("Comparison")
-    metric_cols = st.columns(3)
-    free_flow_eta = float(free_flow.dist[destination])
-    traffic_eta = float(traffic_result.dist[sub_destination])
-    metric_cols[0].metric("Free-flow ETA", format_duration(free_flow_eta))
-    metric_cols[1].metric("Traffic-aware ETA", format_duration(traffic_eta))
-    metric_cols[2].metric("Delta", format_delta(traffic_eta - free_flow_eta))
+                st.session_state.result = {
+                    "origin_latlon": st.session_state.origin,
+                    "destination_latlon": st.session_state.destination,
+                    "free_flow_eta": float(free_flow.dist[destination]),
+                    "traffic_eta": float(traffic_result.dist[sub_destination]),
+                    "free_flow_latlon": path_to_latlon(free_flow_path, csr.lat, csr.lon),
+                    "traffic_latlon": path_to_latlon(traffic_path_full, csr.lat, csr.lon),
+                    "corridor_edges_latlon": corridor_edges_latlon,
+                    "live_edges_latlon": live_edges_latlon,
+                    "traffic_status": traffic_summary(traffic),
+                    "traffic_key_available": client.is_available,
+                }
 
-    if not client.is_available:
-        st.warning(traffic_summary(traffic))
-    else:
-        st.info(traffic_summary(traffic))
-
-    result_map = folium.Map(location=list(st.session_state.origin), zoom_start=13)
-    folium.Marker(
-        st.session_state.origin, tooltip="Origin", icon=folium.Icon(color="green")
-    ).add_to(result_map)
-    folium.Marker(
-        st.session_state.destination, tooltip="Destination", icon=folium.Icon(color="red")
-    ).add_to(result_map)
-
-    corridor_layer = folium.FeatureGroup(name="Corridor")
-    for su in range(corridor.subgraph.n_nodes):
-        full_u = int(corridor.subgraph.sub_to_full[su])
-        for pos in range(corridor.subgraph.indptr[su], corridor.subgraph.indptr[su + 1]):
-            full_v = int(corridor.subgraph.sub_to_full[corridor.subgraph.indices[pos]])
-            folium.PolyLine(
-                [(csr.lat[full_u], csr.lon[full_u]), (csr.lat[full_v], csr.lon[full_v])],
-                color="#999999",
-                weight=1,
-                opacity=0.4,
-            ).add_to(corridor_layer)
-    corridor_layer.add_to(result_map)
-
-    if traffic.matched_edge_positions:
-        live_layer = folium.FeatureGroup(name="Live traffic data")
-        for pos in traffic.matched_edge_positions:
-            su = source_node_of_position(corridor.subgraph.indptr, pos)
-            sv = int(corridor.subgraph.indices[pos])
-            full_u = int(corridor.subgraph.sub_to_full[su])
-            full_v = int(corridor.subgraph.sub_to_full[sv])
-            folium.PolyLine(
-                [(csr.lat[full_u], csr.lon[full_u]), (csr.lat[full_v], csr.lon[full_v])],
-                color="#e6a817",
-                weight=4,
-                opacity=0.8,
-            ).add_to(live_layer)
-        live_layer.add_to(result_map)
-
-    folium.PolyLine(
-        path_to_latlon(free_flow_path, csr.lat, csr.lon),
-        color="#1f77b4",
-        weight=5,
-        tooltip="Free-flow route",
-    ).add_to(result_map)
-    folium.PolyLine(
-        path_to_latlon(traffic_path_full, csr.lat, csr.lon),
-        color="#d62728",
-        weight=3,
-        dash_array="6",
-        tooltip="Traffic-aware route",
-    ).add_to(result_map)
-
-    folium.LayerControl().add_to(result_map)
-    st_folium(result_map, height=500, width=None, returned_objects=[])
+    render_result()
 
 
 if __name__ == "__main__":
