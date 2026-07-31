@@ -1,5 +1,14 @@
 # Traffic-aware router
 
+[![CI](https://github.com/DavideFornari/traffic-aware-router/actions/workflows/ci.yml/badge.svg)](https://github.com/DavideFornari/traffic-aware-router/actions/workflows/ci.yml)
+
+![Free-flow route (blue) vs a reroute under simulated congestion (red), Verona](docs/route_comparison.png)
+
+*Blue: free-flow shortest path. Red: the traffic-adjusted second pass reroutes once the blue
+route's own edges are congested. This image uses simulated congestion, not live TomTom data (see
+`scripts/generate_screenshot.py`) — with a real TomTom key, the same mechanism runs on real
+traffic instead.*
+
 A router that computes the best path between two points on a real road network, weighting edges
 by both free-flow travel time and live traffic. Default area is Verona, Italy, but the area is
 configuration — any OpenStreetMap place name or bounding box works.
@@ -10,10 +19,10 @@ representation, with `networkx` used only as a correctness oracle in tests.
 
 ## Status
 
-**Milestone 7 — UI.** A Streamlit app ties every earlier milestone together: pick an origin and
-destination on the map, by search, or by pasting coordinates; compare the free-flow route against
-the traffic-adjusted one; see the corridor and which edges actually got live data. Runs with no
-TomTom API key at all. See the roadmap below.
+**All 8 milestones complete.** Graph loading and caching, Dijkstra/A*/Yen from scratch over CSR
+arrays, the ellipse-bounded corridor, the TomTom traffic second pass, turn restrictions via a
+line-graph adapter, and a Streamlit UI tying it all together — all runnable with no TomTom API key
+at all. See the roadmap below for what shipped in each milestone, and Benchmarks for results.
 
 ## Try it
 
@@ -34,10 +43,14 @@ one.
   back-street routes and excludes fast roads from the search corridor.
 - All geometric reasoning (ellipse, buffers, matching) happens after projecting to a local metric
   CRS (UTM zone of the area), never in raw lat/lon degrees.
+- **Non-negative edge weights.** Travel times are never negative, which is what makes a
+  lazy-deletion binary-heap Dijkstra correct (see `router/core/dijkstra.py`) instead of requiring
+  Bellman-Ford.
 
-Full design rationale — the two-pass corridor/traffic pipeline, the ellipse containment bound,
-turn-restriction handling via the line graph — is in `CLAUDE.md` and will be promoted into this
-README as each part is implemented.
+`CLAUDE.md` has the full project brief this was built from. Every other mathematical assumption —
+the ellipse containment bound, A* admissibility (twice: once for the node graph, once again for
+the line graph's head-node rule), the traffic-matching bearing check — is stated in a docstring at
+the point it's relied on, and repeated in the relevant section below.
 
 ## Architecture
 
@@ -112,32 +125,8 @@ as computing the same route directly on the node graph (source edge's weight, pl
 shortest path in between, plus target edge's weight — the oracle, as elsewhere in this project),
 and golden tests on the Verona fixture.
 
-### Benchmark: line graph size and cost
-
-`scripts/benchmark_line_graph.py` fetches real restrictions and builds both graphs for the full
-Verona network:
-
-```
-Node graph:  41,460 nodes, 91,074 edges
-Line graph:  91,758 nodes, 230,003 edges  (2.21x the node count)
-Fetched 5,670 restriction relations, resolved 2,559 to graph edges (45%)
-```
-
-| Graph | Algorithm | Mean wall time (ms) |
-|---|---|---|
-| Node graph | Dijkstra | 13.5 |
-| Line graph | Dijkstra | 38.4 |
-| Line graph | A* | 44.8 |
-
-The node-count ratio (2.2x) is lower than CLAUDE.md's architecture notes anticipated (3-4x) —
-Verona's street network is dense enough that its average node degree is higher than that estimate
-assumed, so each node's out-edges (which become line-graph nodes) are fewer relative to the node
-count than in a sparser network. Dijkstra on the line graph takes ~2.8x as long as on the node
-graph, roughly tracking its larger size; A* doesn't recover its usual settled-node advantage here
-for the same pure-Python overhead reason noted in the routing-core benchmark above. The ~45%
-restriction-resolution rate reflects real via-way restrictions (skipped, see above) and relations
-referring to ways/nodes osmnx simplified away — not a bug, but worth knowing before trusting turn
-restrictions are fully enforced on any given network.
+Line graph size and cost vs the node graph, and how many real restrictions actually resolve, are
+in the [Benchmarks](#benchmarks) section below.
 
 `src/router/core/` provides:
 
@@ -156,26 +145,7 @@ edge weight is `distance / speed` with `speed <= v_max` — which guarantees the
 admissible by the triangle inequality on great-circle distance, so A*'s cost must equal
 Dijkstra's (A*); plus golden tests running both algorithms on the committed Verona fixture.
 
-### Benchmark
-
-`scripts/benchmark_core.py` downloads the full default area (not committed; cached under
-`data/cache/`) and times 20 random origin/destination queries. On Verona (41,460 nodes, 91,074
-edges):
-
-| Algorithm | Mean wall time (ms) | Mean settled nodes |
-|---|---|---|
-| networkx Dijkstra | 36.5 | n/a |
-| Our Dijkstra (CSR) | 13.8 | 17,005 |
-| Our A* (CSR) | 15.4 | 9,608 |
-
-Our Dijkstra is ~2.6x faster than networkx's, not the 10–50x CLAUDE.md's architecture notes
-anticipate — both implementations are pure Python, so a hand-rolled `heapq` loop saves networkx's
-object-graph overhead but doesn't escape Python's per-operation cost. A* settles roughly half the
-nodes Dijkstra does (the admissible heuristic prunes the search well) but isn't faster in wall
-time here: haversine/trig calls per heap push are expensive enough in pure Python to offset the
-work saved. A C-level implementation (numpy-vectorised or `scipy.sparse.csgraph`) would very
-likely close both gaps; documented here rather than papered over, since being able to explain a
-benchmark's limits is as important to this project as the number itself.
+Benchmarked against networkx in the [Benchmarks](#benchmarks) section below.
 
 `src/router/core/` also provides `yen_k_shortest_paths` — Yen's algorithm for the k shortest
 loopless paths, built entirely on `dijkstra`. "Removing" a node or edge for a spur search needs no
@@ -286,6 +256,65 @@ used to drive the golden path end-to-end: load the default area, click "Compute 
 zero exceptions, correct ETAs, and the expected no-key warning; and the same-origin/destination
 error path, confirming it fails cleanly rather than crashing.
 
+## Benchmarks
+
+All numbers below are from the full Verona network (41,460 nodes, 91,074 edges), reproducible via
+the scripts named in each section — none of this is committed data, it's all downloaded/cached
+and computed fresh.
+
+### Routing core: our Dijkstra/A* vs networkx
+
+`scripts/benchmark_core.py`, 20 random origin/destination queries:
+
+| Algorithm | Mean wall time (ms) | Mean settled nodes |
+|---|---|---|
+| networkx Dijkstra | 36.5 | n/a |
+| Our Dijkstra (CSR) | 13.8 | 17,005 |
+| Our A* (CSR) | 15.4 | 9,608 |
+
+Our Dijkstra is ~2.6x faster than networkx's, not the 10–50x CLAUDE.md's architecture notes
+anticipate — both implementations are pure Python, so a hand-rolled `heapq` loop saves networkx's
+object-graph overhead but doesn't escape Python's per-operation cost. A* settles roughly half the
+nodes Dijkstra does (the admissible heuristic prunes the search well) but isn't faster in wall
+time here: haversine/trig calls per heap push are expensive enough in pure Python to offset the
+work saved. A C-level implementation (numpy-vectorised or `scipy.sparse.csgraph`) would very
+likely close both gaps; documented here rather than papered over, since being able to explain a
+benchmark's limits is as important to this project as the number itself.
+
+### Corridor: how much of the graph a query actually touches
+
+For the default screenshot query (Piazza Bra to Stadio Bentegodi, `epsilon=0.3`, `k=4`), the
+corridor is 8,446 of 41,460 nodes — about 20% of the city. That's the entire point of the two-pass
+design: Yen and the traffic second pass only ever run on that 20%, not the full graph, however
+large the epsilon or however far apart origin and destination are (`scripts/debug_corridor.py`
+renders exactly this for any query).
+
+### Line graph: turn restrictions' node-count and timing cost
+
+`scripts/benchmark_line_graph.py`, fetching real restrictions and building both graphs:
+
+```
+Node graph:  41,460 nodes, 91,074 edges
+Line graph:  91,758 nodes, 230,003 edges  (2.21x the node count)
+Fetched 5,670 restriction relations, resolved 2,559 to graph edges (45%)
+```
+
+| Graph | Algorithm | Mean wall time (ms) |
+|---|---|---|
+| Node graph | Dijkstra | 13.5 |
+| Line graph | Dijkstra | 38.4 |
+| Line graph | A* | 44.8 |
+
+The node-count ratio (2.2x) is lower than CLAUDE.md's architecture notes anticipated (3-4x) —
+Verona's street network is dense enough that its average node degree is higher than that estimate
+assumed, so each node's out-edges (which become line-graph nodes) are fewer relative to the node
+count than in a sparser network. Dijkstra on the line graph takes ~2.8x as long as on the node
+graph, roughly tracking its larger size; A* doesn't recover its usual settled-node advantage here
+for the same pure-Python overhead reason noted above. The ~45% restriction-resolution rate
+reflects real via-way restrictions (skipped, see the turn-restrictions section) and relations
+referring to ways/nodes osmnx simplified away — not a bug, but worth knowing before trusting turn
+restrictions are fully enforced on any given network.
+
 ## Development
 
 ```bash
@@ -309,11 +338,29 @@ TomTom Traffic API and is subject to TomTom's terms of use.
 
 ## Roadmap
 
-1. Scaffolding
-2. Graph layer — OSM download, caching, CSR adapter, test fixture
-3. Routing core — Dijkstra, A*, hypothesis + golden tests, benchmark
-4. Corridor — ellipse bound, Yen on the ellipse subgraph
-5. Traffic — TomTom client, probe sampling, matching, second pass
-6. Turn restrictions — line graph, turn penalties
-7. UI — Streamlit map with free-flow vs traffic-aware comparison *(this milestone)*
-8. Documentation and benchmarks
+All 8 milestones are complete:
+
+1. ✅ Scaffolding
+2. ✅ Graph layer — OSM download, caching, CSR adapter, test fixture
+3. ✅ Routing core — Dijkstra, A*, hypothesis + golden tests, benchmark
+4. ✅ Corridor — ellipse bound, Yen on the ellipse subgraph
+5. ✅ Traffic — TomTom client, probe sampling, matching, second pass
+6. ✅ Turn restrictions — line graph, turn penalties
+7. ✅ UI — Streamlit map with free-flow vs traffic-aware comparison
+8. ✅ Documentation and benchmarks *(this milestone)*
+
+### Known limitations / possible future work
+
+Documented rather than hidden, since knowing a system's edges is part of being able to defend it:
+
+- **Time-dependent routing.** Traffic is a static snapshot at query time (see Modelling
+  assumptions) — no prediction of conditions at actual arrival time along the route.
+- **Vertically stacked roads** (bridges/underpasses) are indistinguishable from the road below
+  them in the 2D traffic matching (see Traffic).
+- **Via-way turn restrictions** aren't resolved, only via-node ones (see Turn restrictions).
+- **City-scale only.** A full-graph Dijkstra per query is fine at Verona's size; a contraction
+  hierarchy or similar speedup structure would be the next step at a much larger scale (documented
+  as the known scaling path, not built, per CLAUDE.md's scope for this project).
+- **Pure Python.** The core algorithms trade the 10-50x speedup a compiled implementation could
+  give for readability and ease of testing/defending in an interview — a deliberate choice for a
+  portfolio project, not an oversight (see Benchmarks).

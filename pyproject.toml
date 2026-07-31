@@ -30,9 +30,11 @@ dev = [
     "pre-commit>=3",
 ]
 # Standalone map rendering for debug scripts; the Streamlit UI's
-# streamlit-folium (below) depends on this same folium package.
+# streamlit-folium (below) depends on this same folium package. matplotlib
+# is only for static plots (e.g. scripts/generate_screenshot.py).
 viz = [
     "folium>=0.15",
+    "matplotlib>=3.8",
 ]
 app = [
     "streamlit>=1.35",
