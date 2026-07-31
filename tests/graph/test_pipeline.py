@@ -22,3 +22,6 @@ def test_pipeline_produces_a_consistent_csr_graph():
     assert np.all(np.diff(csr.indptr) >= 0)
     assert csr.indptr[-1] == csr.n_edges
     assert len(csr.edge_keys) == csr.n_edges
+    assert csr.lat is not None and csr.lon is not None
+    assert np.all((csr.lat > 45.0) & (csr.lat < 46.0))  # sanity: Verona latitude band
+    assert np.all((csr.lon > 10.0) & (csr.lon < 11.5))

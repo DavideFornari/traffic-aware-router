@@ -25,6 +25,11 @@ class CSRGraph:
     original graph node id (e.g. an OSM node id) for CSR index `i`, and
     `edge_keys[j]` is the `(u, v, key)` of the source graph edge backing
     CSR edge `j`, for mapping a computed route back to geometry.
+
+    `lat`/`lon` (WGS84 degrees, aligned with `node_ids`) are `None` unless
+    every source-graph node carries `lat`/`lon` attributes — they exist only
+    to feed the A* heuristic (Milestone 3), which needs great-circle
+    distance and therefore unprojected coordinates.
     """
 
     indptr: np.ndarray
@@ -32,6 +37,8 @@ class CSRGraph:
     weights: np.ndarray
     node_ids: np.ndarray
     edge_keys: list[tuple[int, int, int]]
+    lat: np.ndarray | None = None
+    lon: np.ndarray | None = None
 
     @property
     def n_nodes(self) -> int:
@@ -85,10 +92,17 @@ def build_csr(graph: nx.MultiDiGraph, weight: str = "travel_time") -> CSRGraph:
             pos += 1
     indptr[n] = pos
 
+    lat = lon = None
+    if all("lat" in graph.nodes[osmid] and "lon" in graph.nodes[osmid] for osmid in node_ids):
+        lat = np.array([graph.nodes[osmid]["lat"] for osmid in node_ids], dtype=np.float64)
+        lon = np.array([graph.nodes[osmid]["lon"] for osmid in node_ids], dtype=np.float64)
+
     return CSRGraph(
         indptr=indptr,
         indices=indices,
         weights=weights,
         node_ids=node_ids,
         edge_keys=edge_keys,
+        lat=lat,
+        lon=lon,
     )
