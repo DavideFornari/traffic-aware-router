@@ -1,200 +1,146 @@
-# Project brief — Traffic-aware router
+# CLAUDE.md — working guide for traffic-aware-router
 
-## Context
+## Project state
 
-I'm a data engineer with a mathematics background, building a portfolio project to demonstrate
-algorithmic and modelling skills for job applications. The repository will be public on GitHub
-and read by recruiters and technical interviewers, so code quality, documentation and repo
-hygiene matter as much as functionality.
+All 8 roadmap milestones are **complete** (scaffolding → graph layer → routing core →
+corridor → traffic → turn restrictions → Streamlit UI → docs/benchmarks). The repo is in
+maintenance/extension mode: the job of any session is to improve or extend it **without
+breaking the invariants below**. `README.md` is the public, complete description of what
+was built and why; this file is the working contract for changing it.
 
-This is my second portfolio project. The first (`padova-transit-punctuality`) showed data
-engineering. This one is deliberately different: the value is in the **modelling and the
-algorithms**, not in the plumbing.
+Audience: this is a public portfolio repo read by recruiters and technical interviewers.
+Code quality, docstrings, commit history, and repo hygiene are part of the product.
+Every commit leaves lint green, tests green, and the app runnable — no exceptions.
 
-## What we're building
+## Environment and verification loop
 
-A router that computes the best path between two points on a real road network, weighting edges
-by both distance and live traffic.
+- Windows 11. The venv is `.venv` (CPython 3.14). `make` is not available in every shell
+  here — prefer the underlying commands:
+  - Tests: `.venv/Scripts/python.exe -m pytest -q` (134 tests, ~4 s; all must pass)
+  - Lint: `.venv/Scripts/python.exe -m ruff check .` (`--fix` for autofixable)
+  - Format: `.venv/Scripts/python.exe -m ruff format .`
+  - App: `.venv/Scripts/python.exe -m streamlit run app/main.py`
+- Run lint + format + full tests **before every commit**. CI (`.github/workflows/ci.yml`,
+  ubuntu / py3.12, installs `.[dev]` only) runs the same — so tests must never import
+  `folium`, `streamlit`, or `matplotlib` (those live in the `viz`/`app` extras).
+- The pre-commit hook runs ruff and may modify files. When a commit fails with
+  "files were modified by this hook", `git add` the fixed files and commit again.
+- Git prints `LF will be replaced by CRLF` warnings on this machine — harmless, ignore.
+- Network access works (Overpass, Nominatim, TomTom docs). Downloads are cached under
+  `data/cache/` and osmnx's `cache/` — both gitignored; never commit them, and never
+  commit an API key or `.env`. `TOMTOM_API_KEY` comes from the environment only.
 
-Default area: **Verona, Italy**. The code must not hardcode it — the area is configuration, and
-any OpenStreetMap place name or bounding box should work.
+## Invariants — do not break these
 
-## Modelling assumptions (state these in the README)
+1. **Layering: the routing core never sees OSM, networkx, or TomTom.** Everything in
+   `src/router/core/` operates on CSR arrays (`indptr`/`indices`/`weights`) plus plain
+   numpy coordinate arrays. Adapters (`graph/csr.py`, `graph/line_graph.py`) are the only
+   crossing point. A change that makes the core import networkx is wrong by construction.
+2. **All geometry in projected metres.** Ellipse, buffers, matching, quantised cache keys —
+   never in raw lat/lon degrees. `prepare_graph` projects once (UTM via osmnx) and stashes
+   `lat`/`lon` on nodes *only* for the A* heuristic and display.
+3. **The app must run with no TomTom key.** `TomTomClient(api_key=None)` is a no-op
+   returning `None`; everything downstream treats "no traffic data" as the normal case and
+   falls back to free-flow, visibly (a warning banner, not silence). Any new traffic
+   feature must preserve this path and its tests.
+4. **networkx is the test oracle only.** Property tests (`hypothesis`) compare our
+   algorithms against networkx on random graphs; golden tests run both on the committed
+   fixture (`tests/fixtures/verona_center.graphml`, the only committed data, ODbL
+   attribution in `tests/fixtures/README.md`). New algorithms get the same triad:
+   unit tests on hand-built graphs, a property test against an oracle, a golden test.
+5. **Mathematical assumptions stated at the point of use.** Non-negative weights
+   (dijkstra), A* admissibility (astar, and again for the line graph's head-node rule),
+   the ellipse time-budget bound (ellipse.py), the bearing check's purpose (matching.py).
+   If a change relies on a new assumption, it goes in a docstring where it's relied on
+   *and* in the README section. These are what the author must defend in interviews.
+6. **The area is configuration.** Nothing outside `graph/config.py` may hardcode Verona;
+   `verona()` is only the default. Any OSM place name or bbox must keep working.
+7. **HTTP is faked in tests.** No test makes a real network call: `httpx` responses are
+   constructed, osmnx download functions are monkeypatched, the UI is exercised with
+   `streamlit.testing.v1.AppTest`. Keep it that way — CI has no quota to spend.
 
-- **Static snapshot model.** Traffic is sampled once, when the route is requested, and edge
-  weights are fixed during the search. This is *not* time-dependent routing: we do not model the
-  traffic an edge will have when the vehicle actually reaches it. Time-dependent weights (and the
-  FIFO property they require for Dijkstra to stay correct) are a documented future extension, not
-  part of this scope.
-- **Free-flow time, not length, is the base metric.** Minimising metres returns implausible
-  back-street routes and — worse — excludes fast roads from the corridor, where no amount of
-  traffic data can bring them back.
-- All geometric reasoning (ellipse, buffers, matching) happens **after projecting to a local
-  metric CRS** (UTM zone of the area, via `osmnx.projection`). Never do geometry in raw lat/lon
-  degrees.
-
-## Architecture
-
-### Layered design — the routing core is graph-agnostic
-
-The single most important structural rule: **the routing algorithms never see OSM, networkx, or
-TomTom.** They operate on a compact array-based graph representation (CSR-style adjacency:
-integer node ids, edge arrays, float weights). Adapters produce that representation:
+## File map
 
 ```
-osmnx graph  ──> node-graph adapter ──┐
-                                      ├──> CSR arrays ──> routing core (Dijkstra / A* / Yen)
-line graph   ──> edge-graph adapter ──┘
+src/router/core/       dijkstra.py, astar.py, yen.py, geometry.py — arrays only
+src/router/graph/      config.py, download.py (GraphML disk cache), prepare.py,
+                       csr.py (node-graph adapter), restrictions.py (Overpass fetch +
+                       resolve), line_graph.py (turn-restriction adapter)
+src/router/corridor/   ellipse.py, subgraph.py, buffer.py, pipeline.py (build_corridor)
+src/router/traffic/    client.py (TomTom), sampling.py, matching.py, cache.py,
+                       pipeline.py (apply_traffic)
+app/                   main.py (Streamlit; all st.*/folium.* code), helpers.py (pure,
+                       unit-tested logic — keep new UI logic here, not in main.py)
+scripts/               benchmark_core.py, benchmark_line_graph.py, debug_corridor.py,
+                       generate_screenshot.py — regenerate README numbers/images
+tests/                 mirrors src layout; fixtures/ holds the committed extract
 ```
 
-Consequences, all intended:
-- Switching to the line graph for turn restrictions swaps an adapter, not the router.
-- The core is trivially testable against small hand-built graphs and property-based random graphs.
-- Dijkstra on plain arrays with a binary heap is 10–50x faster than on networkx object graphs;
-  the benchmark against the networkx oracle doubles as a performance result.
+Convention: `app/main.py` and `scripts/*` use `sys.path.insert` because only `src/` is an
+installed package. Keep new scripts consistent with the existing ones.
 
-Package layout: `src/router/core/` (algorithms, arrays only), `src/router/graph/` (OSM download,
-caching, adapters, line graph), `src/router/traffic/` (TomTom client, matching, cache),
-`src/router/corridor/` (ellipse, k-paths, subgraph extraction), `app/` (Streamlit).
+## Externally verified facts (re-verify before relying on them)
 
-### The two-pass design
+Checked against live docs on 2026-07-31; TomTom can change either at any time:
+- Flow Segment Data endpoint: `GET https://api.tomtom.com/traffic/services/4/
+  flowSegmentData/{style}/{zoom}/json?key=...&point={lat},{lon}&unit=kmph`.
+- Free tier: 20,000 requests/month, no credit card.
 
-Live traffic comes from the **TomTom Traffic API free tier**. The quota does not allow refreshing
-a whole city, so traffic is fetched **on demand, only after origin and destination are known**,
-and only for a corridor between them:
+Any work touching the TomTom client starts by re-checking docs.tomtom.com — do not assume.
 
-1. **First pass — static.** Dijkstra over the whole graph using free-flow travel time.
-   City scale (~10^5 edges) makes a full-graph Dijkstra per query perfectly fine; do not build
-   contraction hierarchies or other speedup structures — overkill at this size, note it in the
-   README as the known scaling path.
-2. **Corridor — ellipse first, then Yen inside it.**
-   - **Ellipse bound, stated correctly.** We accept candidate routes with free-flow time up to
-     `(1+epsilon) * t_star`, where `t_star` is the first-pass optimum. Any such route has length
-     at most `L_max = (1+epsilon) * t_star * v_max`, where `v_max` is the maximum speed in the
-     graph (you cannot cover more distance than time times top speed). Therefore every candidate
-     lies inside the ellipse with foci at origin and destination and major axis `L_max`. This is
-     a provable containment bound *on the time-based objective we actually optimise* — sizing the
-     ellipse by `(1+epsilon)` times the shortest *distance* would be wrong, because a time-optimal
-     route (e.g. a ring road) can be much longer in metres than the distance-shortest path.
-     `epsilon` configurable, default 0.3. Implement the point-in-ellipse test in projected metres.
-   - **Yen's k shortest paths run on the ellipse subgraph, never on the full graph** (k default 4,
-     by free-flow time). Yen is many Dijkstra runs with edges removed; restricting it to the
-     ellipse turns an expensive step into a cheap one. Buffer the union of the k paths and add it
-     to the corridor to capture structurally different alternatives.
-3. **Traffic sampling** (see below) only for corridor edges.
-4. **Second pass.** Dijkstra on the corridor subgraph with traffic-adjusted weights. The UI shows
-   free-flow and traffic-aware routes side by side.
+## Commit conventions
 
-### Traffic layer — TomTom client and map matching
+- Imperative mood, one logical change per commit, body explains the *why*.
+- Ask before anything destructive: force pushes, history rewrites, deleting user-written
+  files. Never push without being asked.
+- Explain design decisions in the conversation as you go — the author wants to understand
+  choices, not just receive files.
 
-Verify current endpoints and free-tier limits against TomTom's live documentation before coding;
-do not assume them.
+## Improvement backlog (from full code review, 2026-08-01)
 
-- Use the **Flow Segment Data** endpoint: given a point, it returns the closest road segment with
-  current speed, free-flow speed and the segment polyline.
-- **Sampling strategy:** do not call once per OSM edge. Sample the corridor at roughly one probe
-  point per ~300 m of corridor length (configurable), taking edge midpoints. This cuts API calls
-  by an order of magnitude at negligible accuracy cost.
-- **Matching returned polylines to OSM edges:** project both to metres, match by buffered
-  geometric overlap **plus a bearing check** (reject candidate edges whose bearing differs from
-  the polyline's local bearing by more than ~30 degrees). Without the bearing check, dual
-  carriageways get the opposite direction's traffic — the classic silent failure of this step.
-- Apply the matched speed as a factor on the affected edges' travel time; edges with no traffic
-  data keep free-flow time.
-- **Cache** per probe point, key = coordinates quantised to ~50 m, TTL default 5 minutes, so
-  nearby repeated queries reuse data.
-- **Documented error modes:** opposite-carriageway assignment, vertically stacked roads (bridges,
-  underpasses) overlapping in 2D, TomTom segments spanning several OSM edges and vice versa.
-  These belong in the README — matching is the fiddliest, least visible part of the project.
+Prioritised; each item is safe to pick up independently. Re-run the relevant benchmark or
+tests after each, and update README if behaviour or numbers change.
 
-### Free-flow speeds
+**P1 — functional gaps**
+1. **Turn restrictions are built but not wired in.** `build_line_graph` is complete and
+   tested, but neither `corridor/pipeline.py` nor `app/main.py` uses it — user-facing
+   routing ignores restrictions. Integrate (fetch+resolve at area load, route the second
+   pass on the line graph) or state the gap prominently in README's limitations. Verified:
+   no import of `line_graph` outside `src/router/graph/` and its tests/benchmark.
+2. **Bearing check uses the whole polyline, not the local bearing.** The original spec
+   says local bearing; `matching.py::edge_matches_segment` compares against the segment's
+   overall start→end bearing, which misjudges long curved TomTom segments. Fix: bearing of
+   the polyline sub-segment nearest the edge midpoint. Add a curved-segment test case.
+3. **Route results vanish on any Streamlit rerun.** `app/main.py` gates results behind
+   `st.button(...)`, so a map click or widget change erases the computed comparison.
+   Persist the last result in `st.session_state` and re-render it.
 
-Use `osmnx.add_edge_speeds` and `add_edge_travel_times` rather than hand-rolling imputation:
-they fill missing `maxspeed` from per-highway-type means. Document the imputation and its bias
-(residential defaults are optimistic). Keep `v_max` for the ellipse bound as the max imputed
-speed actually present in the graph.
+**P2 — performance (measure before/after; scripts exist)**
+4. `app/helpers.py::nearest_node` is a pure-Python loop over all ~41k nodes with a
+   haversine call each — two calls per query. Vectorise with numpy (or KDTree on
+   projected coords, which is also more correct than haversine at city scale).
+5. `_edge_position` (duplicated in `core/yen.py` and `traffic/pipeline.py`) is a linear
+   scan; row indices are sorted, so `np.searchsorted` works. Deduplicate into one helper.
+6. Yen copies the full weight array per spur (`weights.copy()` — O(E) each); the
+   non-negativity check in `dijkstra` also rescans O(E) per spur call. Hoist the check;
+   restore-in-place instead of copying if profiling justifies it.
+7. The corridor layer in `app/main.py` adds one `folium.PolyLine` per edge (thousands of
+   objects; slow render). Batch into a single GeoJson/MultiLineString layer.
 
-### Turn restrictions
-
-OSM encodes banned turns as **relations between pairs of ways**, not edge properties, and osmnx
-does not fetch or apply them. Implementation route:
-- Fetch `type=restriction` relations for the area separately via the Overpass API; map their
-  `from`/`via`/`to` members to graph edges.
-- Route on the **line graph**: each node is a road segment, each arc a manoeuvre. A banned turn
-  is an absent arc; a turn penalty is arc cost. The routing core is unchanged — this is just the
-  edge-graph adapter.
-- On the line graph, the A* heuristic uses the coordinates of the segment's **head node**; state
-  in a docstring why this keeps the heuristic admissible.
-- Expect roughly 3–4x node count; measure and report the cost in the benchmark table.
-
-## Algorithms — implement these myself
-
-The point of the project is the algorithms, so **do not** call `networkx.shortest_path` for the
-core routing. Implement in `src/router/core/`, over CSR arrays:
-
-- **Dijkstra** with a binary heap.
-- **A\*** with the admissible heuristic `great_circle_distance / v_max`, plus a benchmark
-  comparing settled-node counts and wall time against plain Dijkstra.
-- **Yen's k shortest paths**, built on the above.
-
-`networkx` is the **test oracle only**: property-based tests (`hypothesis`) generate small random
-directed graphs and assert my implementations return the same cost as networkx; golden tests run
-fixed origin/destination pairs on a cached Verona extract committed as a test fixture (small
-bbox, not the whole city). Every mathematical assumption — heuristic admissibility, the ellipse
-bound, non-negative weights — gets stated where it is relied upon: these are the parts I must be
-able to defend in an interview.
-
-## Stack
-
-- Python 3.12
-- `osmnx` / `networkx` for graph construction and as test oracle (not for core routing)
-- `shapely` + `pyproj` for projected geometry
-- `httpx` for the TomTom client
-- Streamlit + `streamlit-folium` (or pydeck) for the map UI
-- `pytest` + `hypothesis`; `ruff`, `pre-commit`, GitHub Actions
-
-## Roadmap
-
-1. **Scaffolding** — repo layout, `pyproject.toml`, Makefile, ruff, pre-commit, CI, README skeleton.
-2. **Graph layer** — download and cache the OSM network (serialised so startup is fast), project
-   it, free-flow speeds and times, CSR adapter. Commit a small bbox extract as a test fixture.
-3. **Routing core** — Dijkstra and A\* over CSR arrays, hypothesis tests against the networkx
-   oracle, golden tests on the fixture, benchmark table.
-4. **Corridor** — ellipse (time-budget bound, projected), Yen on the ellipse subgraph, buffered
-   union, subgraph extraction. A debug view rendering the corridor on a map.
-5. **Traffic** — TomTom client, probe sampling, polyline-to-edge matching with bearing check,
-   TTL cache, second pass. Endpoints and limits verified against live docs first.
-6. **Turn restrictions** — Overpass restriction fetch, line-graph adapter, turn penalties,
-   line-graph A\* heuristic note, benchmark update.
-7. **UI** — Streamlit: pick origin and destination on the map or by search, show free-flow vs
-   traffic-aware route side by side, show the corridor, show which edges got live data.
-8. **Documentation and benchmarks** — README with a route-comparison screenshot at the top,
-   results, the modelling assumptions above, and the error modes of matching.
-
-## Hard constraints
-
-- **The app must run without a TomTom API key.** With no key it falls back to free-flow routing
-  and says so in the UI. A project that cannot start without someone else's credentials is dead
-  the day the key expires.
-- Never commit API keys or `.env`. Cached graphs and traffic caches stay out of git; the only
-  committed data is the small test fixture, with its OSM attribution.
-- Respect TomTom's terms of use; document the licences for both TomTom and OpenStreetMap data
-  (OSM is ODbL — attribution required).
-- Every milestone ends in a runnable state.
-- Code, comments, docstrings and documentation in English.
-
-## Scope for this session
-
-**Milestone 1 only.** No graph code, no algorithms, no API client yet.
-
-Definition of done: on a clean machine, `make venv` sets up the environment, `make lint` and
-`make test` both pass, CI runs the same on push, and the README states what the project will do
-and its current status.
-
-## Rules
-
-- Explain design decisions briefly as you go — I want to understand the choices, not just receive files.
-- Ask me before anything destructive: force pushes, history rewrites, deleting files I wrote.
-- Commit messages in imperative mood, one logical change per commit.
-- When a mathematical choice is involved, state the assumption explicitly in a docstring or
-  comment at the point of use. These are the parts I need to be able to defend in an interview.
+**P3 — hygiene, docs, robustness**
+8. `Makefile` `venv` target installs only `.[dev]`; README's "Try it" needs
+   `.[dev,viz,app]`. Align them (e.g. a `make app` target) so both documented paths work.
+9. `app/__init__.py` still says "Implemented in Milestone 7" — stale scaffold comment.
+10. `download.py::_cache_key` ignores the osmnx version; a graph cached by one osmnx
+    major version may deserialize oddly under another. Include `ox.__version__` in the key.
+11. `graph_bbox` silently assumes an *unprojected* graph (y/x are degrees). Add a CRS
+    guard or assertion — passing a projected graph would produce a nonsense Overpass bbox.
+12. Document in README's modelling assumptions: the ellipse containment bound is proved
+    for the *free-flow* objective; the traffic-optimal route can in principle leave the
+    corridor. The corridor is a deliberate approximation for the second pass.
+13. CI matrix: dev machine runs 3.14, CI only 3.12. Add 3.13/3.14 to catch version drift.
+14. `geocode` in `app/main.py` is unbiased global Nominatim — searching "Piazza Bra" can
+    land in another city. Bias the query with the selected area name.
+15. README's line-graph benchmark shows 91,758 line nodes vs 91,074 node-graph CSR edges
+    without explaining the difference (CSR collapses parallel edges; the line graph keeps
+    them). One clarifying sentence avoids a sharp-eyed reviewer reading it as an error.
