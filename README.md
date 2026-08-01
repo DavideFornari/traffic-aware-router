@@ -187,7 +187,15 @@ k paths is folded back in.
   metres, since no edge exceeds `v_max` (time bounds distance). Deliberately sized from the
   *time* budget, not `(1 + epsilon)` times the shortest *distance* — a time-optimal route (e.g. a
   ring road) can be far longer in metres than the distance-shortest path, so a distance-based
-  bound could wrongly exclude it.
+  bound could wrongly exclude it. `v_max` (`graph/prepare.py::max_speed_kph`) is the fastest speed
+  limit anywhere in the *whole loaded graph*, not just near this trip — necessarily so, since the
+  bound has to stay valid for a hypothetical route that does detour onto that faster road. For an
+  area extract that includes a motorway, this makes the ellipse loose (and the corridor
+  correspondingly large) for ordinary in-town trips that never go near it: on Verona's own
+  extract, a stretch of the A4 ("Autostrada Serenissima", 130 km/h) sets `v_max` for every route,
+  even a 2.8 km in-town trip whose own streets top out around 50 km/h — a real, measured instance
+  of this pulled in 20% of the graph's nodes and produced 2,832 traffic-sampling probes for what
+  should have been a small corridor. A deliberate soundness-over-tightness tradeoff, not a bug.
 - `in_ellipse` — the focal definition of an ellipse (sum of distances to the two foci at most
   `l_max`) applied directly to projected node coordinates, needing no center, rotation, or
   semi-axis lengths.

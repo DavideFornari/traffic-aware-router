@@ -219,9 +219,27 @@ it (`403 InsufficientFunds`), which `apply_traffic`'s per-probe `except TomTomAP
 degraded silently into "0 probes matched" rather than surfacing the real cause. That resilience
 behavior is correct per invariant 3 (never crash on a traffic-layer failure) but is worth revisiting
 for visibility (e.g. distinguishing "no traffic data at this probe" from "every probe failed the
-same way" in the UI's status message). Separately, 2,832 probes for one default-sized corridor is
-much higher than the "~1 per 300m" sampling design implies and hasn't been investigated yet — see
-if a large `epsilon`/corridor size on this specific route is the cause.
+same way" in the UI's status message).
+
+**Investigated, documented, deliberately not changed**: why the default Piazza Bra → Stadio
+Bentegodi route samples 2,832 probes, far more than the "~1 per 300m" sampling design implies.
+Root cause is `ellipse_l_max`'s `v_max` (`graph/prepare.py::max_speed_kph`) — the fastest speed
+limit *anywhere in the whole loaded graph*, not anywhere near this trip. The Verona extract
+includes a stretch of the A4 motorway ("Autostrada Serenissima", tagged 130 km/h); that single
+figure sizes the ellipse for every route computed in this area, however local. For this trip
+(straight-line distance 2,846 m, `t_star` 355.6s, an ordinary ~30 km/h urban trip nowhere near
+the motorway), `l_max = 1.3 × 355.6s × 36.1 m/s ≈ 16,695 m` — six times the actual distance —
+which is why the corridor pulls in 8,446 of 41,460 nodes (20% of the whole graph) and ~1,236 km
+of road length. **This is not a bug**: the bound is exactly as proved (invariant 5) — no route
+with free-flow time ≤ `(1+ε)·t_star` can exceed `l_max` metres, given that no edge anywhere
+exceeds 130 km/h, so it has to stay valid even for a hypothetical route that detours onto the
+motorway. It is simply loose whenever the graph contains a much faster road than the specific
+trip uses, which is the common case for any city extract that includes a nearby motorway/ring
+road. Tightening this (e.g. a percentile speed, or a locally-reachable v_max) would trade away
+provability for corridor size and wasn't done — see item 12 below for the existing entry on the
+bound's assumptions, which this extends. If probe *cost* rather than proof strength becomes the
+priority, capping `sample_probe_points`' total probe count (growing `spacing_m` to fit) is a
+safer lever than touching `v_max`.
 
 **P2 — performance (measure before/after; scripts exist)**
 4. `app/helpers.py::nearest_node` is a pure-Python loop over all ~41k nodes with a
