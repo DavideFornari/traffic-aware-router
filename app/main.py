@@ -25,6 +25,7 @@ from pyproj import Transformer
 from streamlit_folium import st_folium
 
 from app.helpers import (
+    apply_map_click,
     format_delta,
     format_duration,
     nearest_edge_endpoints,
@@ -196,6 +197,10 @@ def main() -> None:
         st.session_state.destination = DEFAULT_DESTINATION
     if "traffic_cache" not in st.session_state:
         st.session_state.traffic_cache = TrafficCache()
+    if "pick_mode" not in st.session_state:
+        st.session_state.pick_mode = None  # "Origin", "Destination", or None (inactive)
+    if "last_map_click" not in st.session_state:
+        st.session_state.last_map_click = None
 
     with st.sidebar:
         st.header("Area")
@@ -226,7 +231,25 @@ def main() -> None:
         st.caption("Get a free key at developer.tomtom.com — no credit card required.")
 
         st.header("Origin / destination")
-        pick_mode = st.radio("Clicking the map sets", ["Origin", "Destination"], horizontal=True)
+        st.caption("Pick a point below, then click the map once — it deactivates after use.")
+        pick_col1, pick_col2 = st.columns(2)
+        origin_picking = st.session_state.pick_mode == "Origin"
+        destination_picking = st.session_state.pick_mode == "Destination"
+        if pick_col1.button(
+            "📍 Pick origin…" if not origin_picking else "Click the map…",
+            type="primary" if origin_picking else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state.pick_mode = None if origin_picking else "Origin"
+            st.rerun()  # otherwise this button's own new label lags by one rerun
+        if pick_col2.button(
+            "📍 Pick destination…" if not destination_picking else "Click the map…",
+            type="primary" if destination_picking else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state.pick_mode = None if destination_picking else "Destination"
+            st.rerun()
+
         st.caption(f"Origin: {st.session_state.origin[0]:.5f}, {st.session_state.origin[1]:.5f}")
         st.caption(
             f"Destination: {st.session_state.destination[0]:.5f}, "
@@ -256,6 +279,9 @@ def main() -> None:
         f"{len(restrictions):,} turn restrictions."
     )
 
+    if st.session_state.pick_mode:
+        st.info(f"Click the map to set the {st.session_state.pick_mode.lower()}.")
+
     picker_map = folium.Map(location=list(st.session_state.origin), zoom_start=13)
     folium.Marker(
         st.session_state.origin, tooltip="Origin", icon=folium.Icon(color="green")
@@ -265,12 +291,21 @@ def main() -> None:
     ).add_to(picker_map)
     click = st_folium(picker_map, height=400, width=None, returned_objects=["last_clicked"])
 
+    clicked = None
     if click and click.get("last_clicked"):
         clicked = (click["last_clicked"]["lat"], click["last_clicked"]["lng"])
-        if pick_mode == "Origin":
-            st.session_state.origin = clicked
-        else:
-            st.session_state.destination = clicked
+
+    click_result = apply_map_click(
+        clicked,
+        st.session_state.last_map_click,
+        st.session_state.pick_mode,
+        st.session_state.origin,
+        st.session_state.destination,
+    )
+    st.session_state.origin = click_result.origin
+    st.session_state.destination = click_result.destination
+    st.session_state.last_map_click = click_result.last_map_click
+    st.session_state.pick_mode = click_result.pick_mode
 
     manual_col1, manual_col2 = st.columns(2)
     origin_text = manual_col1.text_input(

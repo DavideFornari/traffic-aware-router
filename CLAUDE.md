@@ -16,7 +16,7 @@ Every commit leaves lint green, tests green, and the app runnable — no excepti
 
 - Windows 11. The venv is `.venv` (CPython 3.14). `make` is not available in every shell
   here — prefer the underlying commands:
-  - Tests: `.venv/Scripts/python.exe -m pytest -q` (168 tests, ~4 s; all must pass)
+  - Tests: `.venv/Scripts/python.exe -m pytest -q` (175 tests, ~4 s; all must pass)
   - Lint: `.venv/Scripts/python.exe -m ruff check .` (`--fix` for autofixable)
   - Format: `.venv/Scripts/python.exe -m ruff format .`
   - App: `.venv/Scripts/python.exe -m streamlit run app/main.py`
@@ -182,6 +182,21 @@ two files' formatting back and forth on every commit. Pinned to `v0.16.1` to mat
     literal virtual point mid-edge (Option A); approach-cost interpolation assumes uniform speed
     along the whole merged edge, which is coarser for long, heterogeneous edges (e.g. a fast
     bridge plus a slow residential stretch) than for short, uniform ones.
+
+**Done (2026-08-01, UX fix)** — origin/destination map-click picker was an `st.radio`
+("Origin"/"Destination"/"Off"), which stayed selected after a click — one stray click after
+picking a point could silently move it again while just panning the map. Replaced with two
+one-use buttons: clicking "Pick origin…" (or destination) arms that pick mode, relabels
+itself to "Click the map…", and the *next* map click applies it and deactivates automatically
+— `app/helpers.py::apply_map_click` (pure, unit-tested: 7 new tests) is the state machine,
+`app/main.py` wires it to `st.session_state.pick_mode`/`last_map_click`. Two things worth
+noting for future state-machine widgets in this app:
+- `streamlit-folium` keeps returning the same `last_clicked` point every rerun until a
+  genuinely new click happens — `apply_map_click` compares against `last_map_click` and is a
+  no-op on a repeat, or a stale click would get replayed the moment a pick mode is armed.
+- A button's own click changes `session_state` but Streamlit has already computed *this*
+  script run's widget labels before that change takes effect — the button's own new label
+  lags one rerun behind unless the handler calls `st.rerun()` immediately, which it does.
 
 **P2 — performance (measure before/after; scripts exist)**
 4. `app/helpers.py::nearest_node` is a pure-Python loop over all ~41k nodes with a

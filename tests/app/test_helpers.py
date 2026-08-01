@@ -4,6 +4,7 @@ import networkx as nx
 import numpy as np
 import pytest
 from app.helpers import (
+    apply_map_click,
     format_delta,
     format_duration,
     nearest_edge_endpoints,
@@ -235,3 +236,83 @@ def test_select_best_endpoints_weighs_approach_cost_against_route_cost():
         destination_candidates=((2, 0.0),),
     )
     assert origin == 1
+
+
+ORIGIN = (1.0, 1.0)
+DESTINATION = (2.0, 2.0)
+
+
+def test_apply_map_click_does_nothing_when_no_click_happened():
+    result = apply_map_click(None, None, "Origin", ORIGIN, DESTINATION)
+    assert result.origin == ORIGIN
+    assert result.destination == DESTINATION
+    assert result.last_map_click is None
+    assert result.pick_mode == "Origin"
+
+
+def test_apply_map_click_sets_origin_and_deactivates_pick_mode():
+    clicked = (10.0, 20.0)
+    result = apply_map_click(clicked, None, "Origin", ORIGIN, DESTINATION)
+    assert result.origin == clicked
+    assert result.destination == DESTINATION
+    assert result.last_map_click == clicked
+    assert result.pick_mode is None  # one-use: deactivates after picking
+
+
+def test_apply_map_click_sets_destination_and_deactivates_pick_mode():
+    clicked = (10.0, 20.0)
+    result = apply_map_click(clicked, None, "Destination", ORIGIN, DESTINATION)
+    assert result.origin == ORIGIN
+    assert result.destination == clicked
+    assert result.pick_mode is None
+
+
+def test_apply_map_click_ignores_a_stale_click_already_seen():
+    # streamlit-folium keeps returning the same last-clicked point every
+    # rerun until the map is clicked again -- a "new" call with the exact
+    # same coordinates as last_map_click must not re-apply it.
+    clicked = (10.0, 20.0)
+    result = apply_map_click(clicked, clicked, "Origin", ORIGIN, DESTINATION)
+    assert result.origin == ORIGIN  # unchanged
+    assert result.pick_mode == "Origin"  # still active, waiting for a real click
+
+
+def test_apply_map_click_does_nothing_when_no_pick_mode_is_active():
+    # Free panning/zooming/clicking the map with no pick mode active must
+    # not change origin or destination -- but the click is still recorded
+    # as "seen" (see the next test) so it can't be replayed later.
+    clicked = (10.0, 20.0)
+    result = apply_map_click(clicked, None, None, ORIGIN, DESTINATION)
+    assert result.origin == ORIGIN
+    assert result.destination == DESTINATION
+    assert result.last_map_click == clicked
+    assert result.pick_mode is None
+
+
+def test_apply_map_click_does_not_replay_an_old_click_after_activating_a_pick_mode():
+    # The exact scenario the "last_map_click" guard exists for: a click
+    # happened while no pick mode was active (ignored, but recorded), then
+    # a pick mode is activated *without* clicking the map again -- the old,
+    # already-seen click must not be silently consumed.
+    old_click = (10.0, 20.0)
+    seen = apply_map_click(old_click, None, None, ORIGIN, DESTINATION)
+    assert seen.pick_mode is None
+
+    # Now a pick mode is active, but `clicked` is still `old_click` (the
+    # map hasn't been clicked again) -- must be ignored.
+    result = apply_map_click(old_click, seen.last_map_click, "Origin", ORIGIN, DESTINATION)
+    assert result.origin == ORIGIN  # NOT old_click
+    assert result.pick_mode == "Origin"  # still waiting for an actual new click
+
+
+def test_apply_map_click_applies_a_genuinely_new_click_after_a_stale_one():
+    old_click = (10.0, 20.0)
+    new_click = (30.0, 40.0)
+    seen = apply_map_click(old_click, None, "Origin", ORIGIN, DESTINATION)
+    assert seen.origin == old_click
+    assert seen.pick_mode is None
+
+    # Reactivate picking, then a real new click arrives.
+    result = apply_map_click(new_click, seen.last_map_click, "Origin", seen.origin, DESTINATION)
+    assert result.origin == new_click
+    assert result.pick_mode is None

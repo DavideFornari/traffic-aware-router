@@ -214,3 +214,47 @@ def parse_latlon(text: str) -> tuple[float, float] | None:
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         return None
     return (lat, lon)
+
+
+@dataclass(frozen=True)
+class MapClickResult:
+    """The effect of one map-click event on the origin/destination pick state."""
+
+    origin: tuple[float, float]
+    destination: tuple[float, float]
+    last_map_click: tuple[float, float] | None
+    pick_mode: str | None
+
+
+def apply_map_click(
+    clicked: tuple[float, float] | None,
+    last_map_click: tuple[float, float] | None,
+    pick_mode: str | None,
+    origin: tuple[float, float],
+    destination: tuple[float, float],
+) -> MapClickResult:
+    """Fold one map click into the origin/destination "pick mode" state.
+
+    `pick_mode` is `"Origin"`, `"Destination"`, or `None` (inactive — the
+    map can be freely panned/zoomed without changing either point).
+    Picking is one-use: a click while a mode is active applies it and
+    returns `pick_mode=None`, so the caller's next render shows the pick
+    button back in its inactive state, per the UX being provided (activate
+    a pick, click the map once, done).
+
+    `streamlit-folium` keeps returning the same last-clicked point on every
+    rerun until the map is clicked again, so `clicked` is compared against
+    `last_map_click` and ignored if unchanged — otherwise activating a pick
+    mode *without* clicking again would immediately (and wrongly) consume
+    a stale click from earlier. This comparison happens whether or not a
+    pick mode is active, so a click made while inactive is still marked
+    "seen" and can't be replayed later once a mode is activated.
+    """
+    if clicked is None or clicked == last_map_click:
+        return MapClickResult(origin, destination, last_map_click, pick_mode)
+
+    if pick_mode == "Origin":
+        return MapClickResult(clicked, destination, clicked, None)
+    if pick_mode == "Destination":
+        return MapClickResult(origin, clicked, clicked, None)
+    return MapClickResult(origin, destination, clicked, pick_mode)

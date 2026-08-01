@@ -264,9 +264,10 @@ doesn't touch `st.*` or `folium.*` directly (endpoint snapping, duration formatt
 traffic-status message, a CSR position → source-node lookup for highlighting matched edges), kept
 separate specifically so it's unit-testable without a running Streamlit session.
 
-- **Origin/destination**, three ways: click the map (a radio picks which point the next click
-  sets), type a place name and hit Search (geocoded via `osmnx`/Nominatim), or paste `lat, lon`
-  directly.
+- **Origin/destination**, three ways: click the map (a one-use "Pick origin…"/"Pick destination…"
+  button arms which point the *next* click sets, then deactivates itself automatically — so the
+  map can be freely panned and zoomed afterwards without risk of moving the point again), type a
+  place name and hit Search (geocoded via `osmnx`/Nominatim), or paste `lat, lon` directly.
 - **Snapping to the road, not the nearest intersection.** A typed address or a click usually
   lands mid-block — the nearest *intersection* to that point is frequently not the intersection
   you'd actually leave from. `nearest_edge_endpoints` (`ox.distance.nearest_edges`, R-tree backed,
