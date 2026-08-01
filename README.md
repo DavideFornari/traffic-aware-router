@@ -260,13 +260,27 @@ traffic-aware route is never faster than free-flow.
 ### UI (`app/`)
 
 `app/main.py` is the Streamlit entry point; `app/helpers.py` holds every piece of logic that
-doesn't touch `st.*` or `folium.*` directly (nearest-node snapping, duration formatting, the
+doesn't touch `st.*` or `folium.*` directly (endpoint snapping, duration formatting, the
 traffic-status message, a CSR position → source-node lookup for highlighting matched edges), kept
 separate specifically so it's unit-testable without a running Streamlit session.
 
 - **Origin/destination**, three ways: click the map (a radio picks which point the next click
   sets), type a place name and hit Search (geocoded via `osmnx`/Nominatim), or paste `lat, lon`
   directly.
+- **Snapping to the road, not the nearest intersection.** A typed address or a click usually
+  lands mid-block — the nearest *intersection* to that point is frequently not the intersection
+  you'd actually leave from (a 200m block puts plenty of nodes closer than the correct one). Uses
+  `nearest_edge_endpoints` (`ox.distance.nearest_edges`, R-tree backed, using the road's true
+  geometry) to find the edge the point actually sits on, then `select_best_endpoints` to choose
+  between its two endpoints by which gives the *cheaper route* — not by which is geometrically
+  closer, since those can disagree (a one-way street or a slower local road can make the farther
+  node the better start). Checks all four combinations of up-to-two origin candidates and
+  up-to-two destination candidates using only two full-graph Dijkstra runs (one per origin
+  candidate, each with no target computing distances to every node — including both destination
+  candidates — in one pass), not four. Applies to all three input methods above, and to both
+  origin and destination. `nearest_node` (plain nearest-intersection snapping) is kept for
+  callers that just need a quick, good-enough node for a fixed point, e.g. the debug/benchmark
+  scripts' hardcoded coordinates.
 - **Comparison**: free-flow ETA, traffic-aware ETA, and the delta, plus both routes drawn on one
   map (solid blue vs dashed red) so the two are visually easy to tell apart. The traffic-aware
   route also respects turn restrictions (see "Turn restrictions" above); a caption says so, and
@@ -284,8 +298,12 @@ separate specifically so it's unit-testable without a running Streamlit session.
 Verified by actually running the app — `streamlit.testing.v1.AppTest` executes `app/main.py`
 server-side (the officially supported way to test a Streamlit script without a browser) and was
 used to drive the golden path end-to-end: load the default area, click "Compute route", confirm
-zero exceptions, correct ETAs, and the expected no-key warning; and the same-origin/destination
-error path, confirming it fails cleanly rather than crashing.
+zero exceptions, correct ETAs, and the expected no-key warning; the same-origin/destination error
+path, confirming it fails cleanly rather than crashing; and a real geocoded-address search
+end-to-end, confirming the resolved point actually reaches the compute step. The edge-snapping fix
+itself has a golden test that reproduces the original bug report directly: on the Verona fixture's
+longest edge (a ~218m block), `nearest_node` picks an intersection that is neither of that edge's
+own endpoints, while `nearest_edge_endpoints` correctly finds both.
 
 ## Benchmarks
 
@@ -398,3 +416,13 @@ Documented rather than hidden, since knowing a system's edges is part of being a
 - **Pure Python.** The core algorithms trade the 10-50x speedup a compiled implementation could
   give for readability and ease of testing/defending in an interview — a deliberate choice for a
   portfolio project, not an oversight (see Benchmarks).
+- **Geocoding is only as precise as Nominatim's match.** `nearest_edge_endpoints` correctly finds
+  the road under whatever point it's given, but a short, generic search string (e.g. a street name
+  with no city/postcode) can resolve to a same-named street in a different town entirely — that's
+  a Nominatim query-specificity issue upstream of anything this project controls, not a snapping
+  bug. Include the postcode or "città" for an unambiguous match.
+- **Endpoint snapping approximates the queried point as one of its nearest road's two
+  intersections**, not the exact mid-block point (Option A in the design discussion — splitting
+  the edge and inserting a virtual node exactly there — would be exact, at the cost of mutating
+  the CSR arrays per query). For a typical block length this is a few tens of metres of error in
+  the reported route, not a wrong route.

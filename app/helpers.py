@@ -7,18 +7,79 @@ directly stays in main.py instead.
 
 from __future__ import annotations
 
+import networkx as nx
 import numpy as np
+import osmnx as ox
 
+from router.core.dijkstra import dijkstra
 from router.core.geometry import great_circle_distance_m
 from router.traffic.pipeline import TrafficResult
 
 
 def nearest_node(lat: np.ndarray, lon: np.ndarray, point: tuple[float, float]) -> int:
-    """Index of the graph node closest to `point` (lat, lon), by great-circle distance."""
+    """Index of the graph node closest to `point` (lat, lon), by great-circle distance.
+
+    Snaps to the nearest *intersection*, which can be a poor proxy for "the
+    road this address is actually on" for a point in the middle of a long
+    block — see `nearest_edge_endpoints` for the address/click/paste case,
+    where that distinction matters. Kept for callers (debug/benchmark
+    scripts) that just need a quick, good-enough node for a fixed point.
+    """
     distances = [
         great_circle_distance_m(lat[i], lon[i], point[0], point[1]) for i in range(len(lat))
     ]
     return int(np.argmin(distances))
+
+
+def nearest_edge_endpoints(graph: nx.MultiDiGraph, x: float, y: float) -> tuple[int, int]:
+    """The `(u, v)` endpoint node ids of the edge nearest `(x, y)`.
+
+    `(x, y)` must be in `graph`'s own CRS (projected metres, for a
+    `prepare_graph`d graph — see `CSRGraph`'s docstring on why). Unlike
+    `nearest_node`, this finds the road the point actually sits on (osmnx's
+    `nearest_edges`, R-tree backed, using the edge's true geometry when the
+    graph has it) rather than guessing by which intersection happens to be
+    closest — the two frequently disagree for a point mid-block, which is
+    exactly the "wrong starting point for a typed address" bug this fixes.
+    Both `u` and `v` are returned as candidates; which one actually gives
+    the better *route* is a routing question, not a geometry one — see
+    `select_best_endpoints`.
+    """
+    u, v, _key = ox.distance.nearest_edges(graph, x, y)
+    return u, v
+
+
+def select_best_endpoints(
+    indptr: np.ndarray,
+    indices: np.ndarray,
+    weights: np.ndarray,
+    origin_candidates: tuple[int, int],
+    destination_candidates: tuple[int, int],
+) -> tuple[int, int]:
+    """Pick whichever origin/destination candidate pair gives the cheapest route.
+
+    `nearest_edge_endpoints` gives two plausible nodes on each end (the
+    queried point could be closer to either end of its nearest edge, and
+    the *closer* one isn't always the one that leads to the *faster*
+    route — a one-way street or a slower local road can make the farther
+    node the better choice). Checks all four combinations of the up-to-two
+    origin candidates and up-to-two destination candidates, using only two
+    full-graph Dijkstra runs (one per origin candidate; each with no
+    target computes distances to every node at once, covering both
+    destination candidates in the same pass) rather than up to four.
+    """
+    origins = list(dict.fromkeys(origin_candidates))
+    destinations = list(dict.fromkeys(destination_candidates))
+
+    best_origin, best_destination, best_cost = origins[0], destinations[0], float("inf")
+    for origin in origins:
+        result = dijkstra(indptr, indices, weights, source=origin)
+        for destination in destinations:
+            cost = float(result.dist[destination])
+            if cost < best_cost:
+                best_origin, best_destination, best_cost = origin, destination, cost
+
+    return best_origin, best_destination
 
 
 def path_to_latlon(path: list[int], lat: np.ndarray, lon: np.ndarray) -> list[tuple[float, float]]:

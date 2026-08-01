@@ -16,7 +16,7 @@ Every commit leaves lint green, tests green, and the app runnable — no excepti
 
 - Windows 11. The venv is `.venv` (CPython 3.14). `make` is not available in every shell
   here — prefer the underlying commands:
-  - Tests: `.venv/Scripts/python.exe -m pytest -q` (134 tests, ~4 s; all must pass)
+  - Tests: `.venv/Scripts/python.exe -m pytest -q` (160 tests, ~4 s; all must pass)
   - Lint: `.venv/Scripts/python.exe -m ruff check .` (`--fix` for autofixable)
   - Format: `.venv/Scripts/python.exe -m ruff format .`
   - App: `.venv/Scripts/python.exe -m streamlit run app/main.py`
@@ -73,8 +73,11 @@ src/router/corridor/   ellipse.py, subgraph.py (Subgraph optionally carries edge
                        builds a corridor-scoped line graph and routes on it)
 src/router/traffic/    client.py (TomTom), sampling.py, matching.py, cache.py,
                        pipeline.py (apply_traffic)
-app/                   main.py (Streamlit; all st.*/folium.* code), helpers.py (pure,
-                       unit-tested logic — keep new UI logic here, not in main.py)
+app/                   main.py (Streamlit; all st.*/folium.* code — load_area caches and
+                       returns the raw networkx graph too, alongside the CSR, for edge
+                       snapping), helpers.py (pure, unit-tested logic incl.
+                       nearest_edge_endpoints/select_best_endpoints — keep new UI logic
+                       here, not in main.py)
 scripts/               benchmark_core.py, benchmark_line_graph.py, debug_corridor.py,
                        generate_screenshot.py — regenerate README numbers/images
 tests/                 mirrors src layout; fixtures/ holds the committed extract
@@ -129,10 +132,40 @@ Also fixed in passing: `.pre-commit-config.yaml` pinned ruff at `v0.6.9` while t
 ran `0.16.1` — the two versions disagreed on import-block ordering and were flip-flopping
 two files' formatting back and forth on every commit. Pinned to `v0.16.1` to match.
 
+**Done (2026-08-01, user-reported bug fix, `feature/nearest-edge-snapping` branch)**
+- **Origin/destination snapped to the wrong node for mid-block addresses.** User report: typing
+  an address ("Via Cavour 01") placed the map marker correctly but routed from a different,
+  visibly-wrong starting point. Root cause: `nearest_node` snaps to the nearest *intersection*,
+  and an address in the middle of a long block can be meaningfully closer to an unrelated
+  intersection than to either end of the road it's actually on. Fixed per the user-approved
+  design (Option B from the pre-implementation briefing — see conversation history for Option A,
+  virtual-node insertion, and why it was rejected as disproportionate):
+  - `nearest_edge_endpoints` (`app/helpers.py`) — `ox.distance.nearest_edges` (R-tree backed, true
+    road geometry) finds the edge the point actually sits on; returns both endpoints as
+    candidates.
+  - `select_best_endpoints` (`app/helpers.py`) — picks whichever of up to 4 origin×destination
+    candidate combinations gives the cheapest *route*, not whichever candidate is geometrically
+    closer (those can disagree — a one-way street or slower local road can make the farther node
+    the better start). Only 2 full-graph Dijkstra runs (one per origin candidate; `target=None`
+    covers both destination candidates per run), not 4.
+  - `load_area()` now also returns the raw `networkx` graph (previously discarded after building
+    the CSR) — `nearest_edges` needs it.
+  - Applies uniformly to origin and destination, and to all three input methods (search/click/
+    paste), since they all funnel through the same snap-to-graph step.
+  - Golden test reproduces the exact bug on real data: the Verona fixture's longest edge (~218m)
+    has a midpoint whose nearest *node* is neither of that edge's own endpoints.
+  - `nearest_node` (plain nearest-intersection) is kept for fixed-coordinate callers (debug/
+    benchmark scripts) that don't need this precision.
+  - **Known residual limitation, documented not hidden**: this snaps to one of the road's two
+    *endpoints*, not the exact mid-block point (that would be Option A). A few tens of metres of
+    error in a reported route, never a wrong road.
+
 **P2 — performance (measure before/after; scripts exist)**
 4. `app/helpers.py::nearest_node` is a pure-Python loop over all ~41k nodes with a
    haversine call each — two calls per query. Vectorise with numpy (or KDTree on
-   projected coords, which is also more correct than haversine at city scale).
+   projected coords, which is also more correct than haversine at city scale). Still applies
+   to `nearest_node` itself (kept for fixed-coordinate callers); `nearest_edge_endpoints` (new,
+   used for all user-facing origin/destination input) is already fast — R-tree backed via osmnx.
 5. `_edge_position` (duplicated in `core/yen.py` and `traffic/pipeline.py`) is a linear
    scan; row indices are sorted, so `np.searchsorted` works. Deduplicate into one helper.
 6. Yen copies the full weight array per spur (`weights.copy()` — O(E) each); the
@@ -154,7 +187,12 @@ two files' formatting back and forth on every commit. Pinned to `v0.16.1` to mat
     corridor. The corridor is a deliberate approximation for the second pass.
 13. CI matrix: dev machine runs 3.14, CI only 3.12. Add 3.13/3.14 to catch version drift.
 14. `geocode` in `app/main.py` is unbiased global Nominatim — searching "Piazza Bra" can
-    land in another city. Bias the query with the selected area name.
+    land in another city. Bias the query with the selected area name. **Confirmed live**
+    during the nearest-edge-snapping work: `ox.geocode("Via Cavour, Verona, Italy")` — the
+    city name included — still resolved ~30km away to an unrelated street sharing the name.
+    A separate, upstream-of-routing issue from the endpoint-snapping fix above (that fix
+    correctly routes from wherever geocoding says the point is; this item is about geocoding
+    saying the wrong point in the first place).
 15. README's line-graph benchmark shows 91,758 line nodes vs 91,074 node-graph CSR edges
     without explaining the difference (CSR collapses parallel edges; the line graph keeps
     them). One clarifying sentence avoids a sharp-eyed reviewer reading it as an error.

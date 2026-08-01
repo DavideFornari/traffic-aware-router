@@ -27,9 +27,10 @@ from streamlit_folium import st_folium
 from app.helpers import (
     format_delta,
     format_duration,
-    nearest_node,
+    nearest_edge_endpoints,
     parse_latlon,
     path_to_latlon,
+    select_best_endpoints,
     source_node_of_position,
     traffic_summary,
 )
@@ -73,7 +74,7 @@ def load_area(place: str):
         # fallback — a missing external service degrades, never blocks.
         restrictions = []
 
-    return csr, v_max_mps, to_wgs84, to_projected, restrictions
+    return csr, graph, v_max_mps, to_wgs84, to_projected, restrictions
 
 
 def geocode(query: str) -> tuple[float, float] | None:
@@ -227,7 +228,7 @@ def main() -> None:
                 else:
                     st.warning(f"Couldn't find {destination_query!r}.")
 
-    csr, v_max_mps, to_wgs84_t, to_projected_t, restrictions = load_area(place)
+    csr, graph, v_max_mps, to_wgs84_t, to_projected_t, restrictions = load_area(place)
     st.caption(
         f"Loaded {csr.n_nodes:,} nodes, {csr.n_edges:,} edges, "
         f"{len(restrictions):,} turn restrictions."
@@ -265,8 +266,30 @@ def main() -> None:
         st.session_state.destination = parsed_destination
 
     if st.button("Compute route", type="primary"):
-        origin = nearest_node(csr.lat, csr.lon, st.session_state.origin)
-        destination = nearest_node(csr.lat, csr.lon, st.session_state.destination)
+        # Snap to the nearest *edge*, not the nearest node/intersection: a
+        # typed address or a click usually lands mid-block, and the nearest
+        # intersection to that point is often not the intersection you'd
+        # actually leave from. Both of that edge's endpoints are candidate
+        # start/end nodes; select_best_endpoints picks whichever pair gives
+        # the cheaper route rather than assuming the geometrically closer
+        # endpoint is the routing-wise better one (see app/helpers.py).
+        origin_x, origin_y = to_projected_t.transform(
+            st.session_state.origin[1], st.session_state.origin[0]
+        )
+        destination_x, destination_y = to_projected_t.transform(
+            st.session_state.destination[1], st.session_state.destination[0]
+        )
+        origin_candidates = tuple(
+            int(np.searchsorted(csr.node_ids, n))
+            for n in nearest_edge_endpoints(graph, origin_x, origin_y)
+        )
+        destination_candidates = tuple(
+            int(np.searchsorted(csr.node_ids, n))
+            for n in nearest_edge_endpoints(graph, destination_x, destination_y)
+        )
+        origin, destination = select_best_endpoints(
+            csr.indptr, csr.indices, csr.weights, origin_candidates, destination_candidates
+        )
         if origin == destination:
             st.error("Origin and destination snapped to the same graph node — pick farther apart.")
         else:
