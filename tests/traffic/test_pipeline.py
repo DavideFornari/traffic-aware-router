@@ -6,6 +6,9 @@ fake client in scripts/debug_corridor.py's spirit but purpose-built for
 tests.
 """
 
+import threading
+import time
+
 import numpy as np
 import pytest
 
@@ -64,6 +67,51 @@ def _straight_line_graph():
     indices = np.array([1, 2])
     weights = np.array([10.0, 10.0])
     return indptr, indices, weights, x, y
+
+
+def _long_straight_line_graph(n_edges: int):
+    # A chain of n_edges 100m hops along x, long enough that spacing_m=50
+    # samples multiple probes per edge — used to exercise real concurrency.
+    x = np.array([100.0 * i for i in range(n_edges + 1)])
+    y = np.zeros(n_edges + 1)
+    indptr = np.array(list(range(n_edges + 1)) + [n_edges])
+    indices = np.array(list(range(1, n_edges + 1)))
+    weights = np.full(n_edges, 10.0)
+    return indptr, indices, weights, x, y
+
+
+class _ConcurrencyTrackingClient:
+    """Records the peak number of `get_flow_segment` calls in flight at
+    once, to verify `apply_traffic` actually parallelizes network fetches
+    (and respects `max_workers` as a cap) rather than just accepting the
+    parameter without using it."""
+
+    is_available = True
+
+    def __init__(self, latency_s: float = 0.05):
+        self.latency_s = latency_s
+        self._lock = threading.Lock()
+        self._active = 0
+        self.max_active = 0
+        self.calls = 0
+
+    def get_flow_segment(self, lat, lon):
+        with self._lock:
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+            self.calls += 1
+        time.sleep(self.latency_s)
+        with self._lock:
+            self._active -= 1
+        return FlowSegment(
+            current_speed_kph=30.0,
+            free_flow_speed_kph=60.0,
+            current_travel_time_s=0.0,
+            free_flow_travel_time_s=0.0,
+            confidence=1.0,
+            road_closure=False,
+            coordinates=[(lat, lon - 1000.0), (lat, lon + 1000.0)],
+        )
 
 
 def test_no_client_available_returns_unchanged_weights():
@@ -198,3 +246,82 @@ def test_never_scales_weight_by_more_than_free_flow_speed_ratio():
     )
 
     assert np.all(result.adjusted_weights >= weights - 1e-9)
+
+
+def test_probes_are_fetched_concurrently_up_to_max_workers():
+    indptr, indices, weights, x, y = _long_straight_line_graph(n_edges=20)
+    client = _ConcurrencyTrackingClient(latency_s=0.05)
+
+    result = apply_traffic(
+        indptr,
+        indices,
+        weights,
+        x,
+        y,
+        _identity_to_wgs84,
+        _identity_to_projected,
+        client,
+        spacing_m=50.0,
+        max_workers=4,
+    )
+
+    assert client.calls > 4  # enough probes that a real cap is exercised
+    assert 1 < client.max_active <= 4
+    assert result.probes_matched == client.calls
+
+
+def test_max_workers_of_one_fetches_strictly_sequentially():
+    indptr, indices, weights, x, y = _long_straight_line_graph(n_edges=20)
+    client = _ConcurrencyTrackingClient(latency_s=0.02)
+
+    apply_traffic(
+        indptr,
+        indices,
+        weights,
+        x,
+        y,
+        _identity_to_wgs84,
+        _identity_to_projected,
+        client,
+        spacing_m=50.0,
+        max_workers=1,
+    )
+
+    assert client.max_active == 1
+
+
+def test_parallel_fetch_result_matches_sequential_result():
+    # Concurrency must not change *what* gets matched/adjusted, only how
+    # fast the fetches happen — compare max_workers=1 (effectively the old
+    # sequential behaviour) against a parallel run on the same graph.
+    indptr, indices, weights, x, y = _long_straight_line_graph(n_edges=20)
+
+    sequential = apply_traffic(
+        indptr,
+        indices,
+        weights,
+        x,
+        y,
+        _identity_to_wgs84,
+        _identity_to_projected,
+        _FakeClient(current_speed=30.0, free_flow_speed=60.0),
+        spacing_m=50.0,
+        max_workers=1,
+    )
+    parallel = apply_traffic(
+        indptr,
+        indices,
+        weights,
+        x,
+        y,
+        _identity_to_wgs84,
+        _identity_to_projected,
+        _FakeClient(current_speed=30.0, free_flow_speed=60.0),
+        spacing_m=50.0,
+        max_workers=8,
+    )
+
+    assert sequential.probes_queried == parallel.probes_queried
+    assert sequential.probes_matched == parallel.probes_matched
+    assert sequential.matched_edge_positions == parallel.matched_edge_positions
+    np.testing.assert_array_equal(sequential.adjusted_weights, parallel.adjusted_weights)

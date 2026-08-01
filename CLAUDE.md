@@ -16,7 +16,7 @@ Every commit leaves lint green, tests green, and the app runnable — no excepti
 
 - Windows 11. The venv is `.venv` (CPython 3.14). `make` is not available in every shell
   here — prefer the underlying commands:
-  - Tests: `.venv/Scripts/python.exe -m pytest -q` (175 tests, ~4 s; all must pass)
+  - Tests: `.venv/Scripts/python.exe -m pytest -q` (178 tests, ~5 s; all must pass)
   - Lint: `.venv/Scripts/python.exe -m ruff check .` (`--fix` for autofixable)
   - Format: `.venv/Scripts/python.exe -m ruff format .`
   - App: `.venv/Scripts/python.exe -m streamlit run app/main.py`
@@ -197,6 +197,31 @@ noting for future state-machine widgets in this app:
 - A button's own click changes `session_state` but Streamlit has already computed *this*
   script run's widget labels before that change takes effect — the button's own new label
   lags one rerun behind unless the handler calls `st.rerun()` immediately, which it does.
+
+**Done (2026-08-01, performance)** — a live test with a real TomTom key showed a single route
+computation taking ~20s+, dominated by `apply_traffic` querying TomTom **sequentially**, one
+blocking HTTP call per sampled probe (a real corridor can sample thousands — e.g. 2,832 probes
+for the default Piazza Bra → Stadio Bentegodi route). Fixed: `traffic/pipeline.py::apply_traffic`
+now resolves cache hits first (no I/O), then fetches the remaining cache misses concurrently via
+`concurrent.futures.ThreadPoolExecutor` (new `max_workers` param, default 8 — TomTom doesn't
+document a hard per-second limit on the free tier, so 8 is a conservative cap against whatever
+limit does exist, not a tuned number). `httpx.Client` is documented safe to share across threads
+(better connection pooling than one client per thread), so the same client instance is reused
+as-is. Matching and weight-array mutation stay strictly single-threaded and in probe order
+afterwards — only the network wait is parallelized, so results are bit-identical to the old
+sequential run (verified directly: `test_parallel_fetch_result_matches_sequential_result`), and
+concurrency is verified for real with a fake client that tracks peak in-flight calls
+(`test_probes_are_fetched_concurrently_up_to_max_workers`, `test_max_workers_of_one_fetches_strictly_sequentially`).
+**Found in passing, not yet fixed**: live-testing this surfaced that the account behind the
+tested key is on a credit-based TomTom plan, not (or not only) the request-count free tier the
+client's docstring describes — a burst of a few thousand probe queries during testing exhausted
+it (`403 InsufficientFunds`), which `apply_traffic`'s per-probe `except TomTomAPIError: continue`
+degraded silently into "0 probes matched" rather than surfacing the real cause. That resilience
+behavior is correct per invariant 3 (never crash on a traffic-layer failure) but is worth revisiting
+for visibility (e.g. distinguishing "no traffic data at this probe" from "every probe failed the
+same way" in the UI's status message). Separately, 2,832 probes for one default-sized corridor is
+much higher than the "~1 per 300m" sampling design implies and hasn't been investigated yet — see
+if a large `epsilon`/corridor size on this specific route is the cause.
 
 **P2 — performance (measure before/after; scripts exist)**
 4. `app/helpers.py::nearest_node` is a pure-Python loop over all ~41k nodes with a
