@@ -108,6 +108,14 @@ def render_result() -> None:
     else:
         st.info(result["traffic_status"])
 
+    if result["approach_total"] > 5.0:
+        st.caption(
+            f"Includes ~{format_duration(result['approach_total'])} to reach the road network "
+            "from the exact origin/destination points — they can land mid-way along a long "
+            "merged OSM edge (e.g. a street that continues across a bridge under a different "
+            "name), not right at a routable intersection. See README's UI section."
+        )
+
     if result["restriction_count"]:
         if result["restrictions_applied"]:
             st.caption(
@@ -139,6 +147,20 @@ def render_result() -> None:
         for start, end in result["live_edges_latlon"]:
             folium.PolyLine([start, end], color="#e6a817", weight=4, opacity=0.8).add_to(live_layer)
         live_layer.add_to(result_map)
+
+    # Approach segments: pin -> nearest routable node, following the snapped
+    # edge's own geometry. Deliberately styled distinctly from the routed
+    # lines below (thin, dotted, grey) — this portion is an interpolated
+    # estimate, not something the corridor/traffic pipeline actually routed.
+    for connector in (result["origin_connector_latlon"], result["destination_connector_latlon"]):
+        folium.PolyLine(
+            connector,
+            color="#555555",
+            weight=2,
+            dash_array="2,6",
+            opacity=0.7,
+            tooltip="Approach to the road network (estimated)",
+        ).add_to(result_map)
 
     folium.PolyLine(
         result["free_flow_latlon"], color="#1f77b4", weight=5, tooltip="Free-flow route"
@@ -279,17 +301,25 @@ def main() -> None:
         destination_x, destination_y = to_projected_t.transform(
             st.session_state.destination[1], st.session_state.destination[0]
         )
+        origin_snap = nearest_edge_endpoints(graph, origin_x, origin_y)
+        destination_snap = nearest_edge_endpoints(graph, destination_x, destination_y)
         origin_candidates = tuple(
-            int(np.searchsorted(csr.node_ids, n))
-            for n in nearest_edge_endpoints(graph, origin_x, origin_y)
+            (int(np.searchsorted(csr.node_ids, n)), approach)
+            for n, approach in origin_snap.candidates
         )
         destination_candidates = tuple(
-            int(np.searchsorted(csr.node_ids, n))
-            for n in nearest_edge_endpoints(graph, destination_x, destination_y)
+            (int(np.searchsorted(csr.node_ids, n)), approach)
+            for n, approach in destination_snap.candidates
         )
         origin, destination = select_best_endpoints(
             csr.indptr, csr.indices, csr.weights, origin_candidates, destination_candidates
         )
+        # The approach cost of whichever candidate was actually chosen —
+        # added to the reported ETA below, so it stays consistent with what
+        # select_best_endpoints just used to make that choice, rather than
+        # silently dropping it from the displayed number.
+        origin_approach = dict(origin_candidates)[origin]
+        destination_approach = dict(destination_candidates)[destination]
         if origin == destination:
             st.error("Origin and destination snapped to the same graph node — pick farther apart.")
         else:
@@ -337,6 +367,24 @@ def main() -> None:
                 # restricted_second_pass.py's module docstring).
                 origin_real_id = int(csr.node_ids[origin])
                 destination_real_id = int(csr.node_ids[destination])
+
+                # The approach segment: the query point is often not right at
+                # a routable node (see nearest_edge_endpoints), so without
+                # this the drawn route would visually start/end at the
+                # chosen node instead of the actual pin, disagreeing with
+                # what's on the map. Follows the snapped edge's own geometry
+                # (not a straight line) so a long merged edge — e.g. one that
+                # crosses a bridge — is drawn crossing the bridge, not
+                # cutting across whatever it goes around.
+                origin_connector_latlon = [st.session_state.origin] + [
+                    to_wgs84_t.transform(x, y)[::-1]
+                    for x, y in origin_snap.connector_coords(origin_real_id)
+                ]
+                destination_connector_latlon = [
+                    to_wgs84_t.transform(x, y)[::-1]
+                    for x, y in reversed(destination_snap.connector_coords(destination_real_id))
+                ] + [st.session_state.destination]
+
                 second_pass = route_corridor_second_pass(
                     corridor.subgraph,
                     csr.node_ids[corridor.subgraph.sub_to_full],
@@ -412,11 +460,12 @@ def main() -> None:
                         )
                     )
 
+                approach_total = origin_approach + destination_approach
                 st.session_state.result = {
                     "origin_latlon": st.session_state.origin,
                     "destination_latlon": st.session_state.destination,
-                    "free_flow_eta": float(free_flow.dist[destination]),
-                    "traffic_eta": float(traffic_eta),
+                    "free_flow_eta": float(free_flow.dist[destination]) + approach_total,
+                    "traffic_eta": float(traffic_eta) + approach_total,
                     "free_flow_latlon": path_to_latlon(free_flow_path, csr.lat, csr.lon),
                     "traffic_latlon": path_to_latlon(traffic_path_full, csr.lat, csr.lon),
                     "corridor_edges_latlon": corridor_edges_latlon,
@@ -425,6 +474,9 @@ def main() -> None:
                     "traffic_key_available": client.is_available,
                     "restrictions_applied": restrictions_applied,
                     "restriction_count": len(restrictions),
+                    "approach_total": approach_total,
+                    "origin_connector_latlon": origin_connector_latlon,
+                    "destination_connector_latlon": destination_connector_latlon,
                 }
 
     render_result()

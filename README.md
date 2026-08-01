@@ -269,18 +269,28 @@ separate specifically so it's unit-testable without a running Streamlit session.
   directly.
 - **Snapping to the road, not the nearest intersection.** A typed address or a click usually
   lands mid-block — the nearest *intersection* to that point is frequently not the intersection
-  you'd actually leave from (a 200m block puts plenty of nodes closer than the correct one). Uses
-  `nearest_edge_endpoints` (`ox.distance.nearest_edges`, R-tree backed, using the road's true
-  geometry) to find the edge the point actually sits on, then `select_best_endpoints` to choose
-  between its two endpoints by which gives the *cheaper route* — not by which is geometrically
-  closer, since those can disagree (a one-way street or a slower local road can make the farther
-  node the better start). Checks all four combinations of up-to-two origin candidates and
-  up-to-two destination candidates using only two full-graph Dijkstra runs (one per origin
-  candidate, each with no target computing distances to every node — including both destination
-  candidates — in one pass), not four. Applies to all three input methods above, and to both
-  origin and destination. `nearest_node` (plain nearest-intersection snapping) is kept for
-  callers that just need a quick, good-enough node for a fixed point, e.g. the debug/benchmark
-  scripts' hardcoded coordinates.
+  you'd actually leave from. `nearest_edge_endpoints` (`ox.distance.nearest_edges`, R-tree backed,
+  using the road's true geometry) finds the edge the point actually sits on and returns both
+  endpoints as an `EdgeSnap`. osmnx collapses any chain of degree-2 nodes into a single graph
+  edge regardless of length or of the street name changing partway through — a merged edge can
+  run hundreds of metres, e.g. a street that continues across a bridge under a different name, so
+  *both* endpoints can be far from the query point, in different directions. `EdgeSnap` projects
+  the query point onto the edge's own geometry and splits its travel time proportionally,
+  producing a real *approach cost* for each endpoint instead of assuming both are free to reach.
+  `select_best_endpoints` then picks whichever of the (up to four) origin×destination combinations
+  gives the cheapest **total** trip — approach + route + approach — not whichever is geometrically
+  closer or has the cheapest route alone, since those can each disagree with the true total (a
+  farther-to-reach node can still win if its route is enough cheaper, and that can be the
+  genuinely correct answer, e.g. a route that legitimately crosses a bridge immediately). Only two
+  full-graph Dijkstra runs are needed (one per origin candidate; `target=None` covers both
+  destination candidates per run), not four. The reported ETA includes the winning approach cost
+  too (a caption discloses it when non-trivial), and a dotted grey connector — following the
+  snapped edge's real geometry, not a straight line — is drawn from the pin to wherever the route
+  actually starts/ends, so a long merged edge is drawn crossing the bridge it represents rather
+  than leaving an unexplained gap between the pin and the route. Applies to both origin and
+  destination, across all three input methods above. `nearest_node` (plain nearest-intersection
+  snapping, no approach cost) is kept for callers that just need a quick, good-enough node for a
+  fixed point, e.g. the debug/benchmark scripts' hardcoded coordinates.
 - **Comparison**: free-flow ETA, traffic-aware ETA, and the delta, plus both routes drawn on one
   map (solid blue vs dashed red) so the two are visually easy to tell apart. The traffic-aware
   route also respects turn restrictions (see "Turn restrictions" above); a caption says so, and
@@ -302,8 +312,18 @@ zero exceptions, correct ETAs, and the expected no-key warning; the same-origin/
 path, confirming it fails cleanly rather than crashing; and a real geocoded-address search
 end-to-end, confirming the resolved point actually reaches the compute step. The edge-snapping fix
 itself has a golden test that reproduces the original bug report directly: on the Verona fixture's
-longest edge (a ~218m block), `nearest_node` picks an intersection that is neither of that edge's
-own endpoints, while `nearest_edge_endpoints` correctly finds both.
+longest edge (a ~230m block of merged street names), `nearest_node` picks an intersection that is
+neither of that edge's own endpoints, while `nearest_edge_endpoints` correctly finds both and
+prices a real, non-zero approach cost to each.
+
+The approach-cost/connector fix was verified against the exact real-world case that motivated it:
+querying the actual geocoded coordinates of an address on a ~650m osmnx-merged edge that crosses
+Ponte della Vittoria in Verona (part "Corso Cavour", part the bridge itself, part two more streets
+on the far bank) confirmed the interpolation splits the edge's travel time correctly between its
+two ends, and that a route genuinely can be cheaper via the far side of a bridge crossing — in
+that case the fix's job isn't to force the "near" endpoint, it's to make sure the far endpoint was
+chosen for a real cost reason and that the drawn connector actually shows the bridge crossing
+instead of leaving a gap on the map.
 
 ## Benchmarks
 
@@ -421,8 +441,15 @@ Documented rather than hidden, since knowing a system's edges is part of being a
   with no city/postcode) can resolve to a same-named street in a different town entirely — that's
   a Nominatim query-specificity issue upstream of anything this project controls, not a snapping
   bug. Include the postcode or "città" for an unambiguous match.
-- **Endpoint snapping approximates the queried point as one of its nearest road's two
-  intersections**, not the exact mid-block point (Option A in the design discussion — splitting
-  the edge and inserting a virtual node exactly there — would be exact, at the cost of mutating
-  the CSR arrays per query). For a typical block length this is a few tens of metres of error in
-  the reported route, not a wrong route.
+- **Endpoint snapping still routes from one of the nearest road's two intersections**, not the
+  exact mid-block point (splitting the edge and inserting a real virtual node there — Option A in
+  the design discussion — would be exact, at the cost of mutating the CSR arrays per query). The
+  approach-cost/connector fix makes the *time estimate and the map* honest about this (both
+  endpoints are priced and drawn instead of assumed free), but the underlying route still runs
+  node-to-node; the "last mile" approach is an interpolated straight-through-the-edge estimate,
+  not a routed path of its own (irrelevant in practice, since it's a single edge with nowhere else
+  to go, but worth stating precisely).
+- **Approach-cost interpolation assumes uniform speed along the whole merged edge.** A 650m edge
+  that's mostly a fast bridge crossing plus a short slow residential stretch gets its travel time
+  split by *distance*, not by how that speed actually varies along the way — a coarser
+  approximation for long, heterogeneous merged edges than for short, uniform ones.

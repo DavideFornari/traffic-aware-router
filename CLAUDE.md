@@ -16,7 +16,7 @@ Every commit leaves lint green, tests green, and the app runnable — no excepti
 
 - Windows 11. The venv is `.venv` (CPython 3.14). `make` is not available in every shell
   here — prefer the underlying commands:
-  - Tests: `.venv/Scripts/python.exe -m pytest -q` (160 tests, ~4 s; all must pass)
+  - Tests: `.venv/Scripts/python.exe -m pytest -q` (168 tests, ~4 s; all must pass)
   - Lint: `.venv/Scripts/python.exe -m ruff check .` (`--fix` for autofixable)
   - Format: `.venv/Scripts/python.exe -m ruff format .`
   - App: `.venv/Scripts/python.exe -m streamlit run app/main.py`
@@ -132,33 +132,56 @@ Also fixed in passing: `.pre-commit-config.yaml` pinned ruff at `v0.6.9` while t
 ran `0.16.1` — the two versions disagreed on import-block ordering and were flip-flopping
 two files' formatting back and forth on every commit. Pinned to `v0.16.1` to match.
 
-**Done (2026-08-01, user-reported bug fix, `feature/nearest-edge-snapping` branch)**
-- **Origin/destination snapped to the wrong node for mid-block addresses.** User report: typing
-  an address ("Via Cavour 01") placed the map marker correctly but routed from a different,
-  visibly-wrong starting point. Root cause: `nearest_node` snaps to the nearest *intersection*,
-  and an address in the middle of a long block can be meaningfully closer to an unrelated
-  intersection than to either end of the road it's actually on. Fixed per the user-approved
-  design (Option B from the pre-implementation briefing — see conversation history for Option A,
-  virtual-node insertion, and why it was rejected as disproportionate):
-  - `nearest_edge_endpoints` (`app/helpers.py`) — `ox.distance.nearest_edges` (R-tree backed, true
-    road geometry) finds the edge the point actually sits on; returns both endpoints as
-    candidates.
-  - `select_best_endpoints` (`app/helpers.py`) — picks whichever of up to 4 origin×destination
-    candidate combinations gives the cheapest *route*, not whichever candidate is geometrically
-    closer (those can disagree — a one-way street or slower local road can make the farther node
-    the better start). Only 2 full-graph Dijkstra runs (one per origin candidate; `target=None`
-    covers both destination candidates per run), not 4.
-  - `load_area()` now also returns the raw `networkx` graph (previously discarded after building
-    the CSR) — `nearest_edges` needs it.
-  - Applies uniformly to origin and destination, and to all three input methods (search/click/
-    paste), since they all funnel through the same snap-to-graph step.
-  - Golden test reproduces the exact bug on real data: the Verona fixture's longest edge (~218m)
-    has a midpoint whose nearest *node* is neither of that edge's own endpoints.
-  - `nearest_node` (plain nearest-intersection) is kept for fixed-coordinate callers (debug/
-    benchmark scripts) that don't need this precision.
-  - **Known residual limitation, documented not hidden**: this snaps to one of the road's two
-    *endpoints*, not the exact mid-block point (that would be Option A). A few tens of metres of
-    error in a reported route, never a wrong road.
+**Done (2026-08-01, user-reported bug fix, `feature/nearest-edge-snapping` branch, two rounds)**
+- **Round 1 — origin/destination snapped to the wrong node for mid-block addresses.** User
+  report: typing an address ("Via Cavour 01") placed the map marker correctly but routed from a
+  different, visibly-wrong starting point. Root cause: `nearest_node` snaps to the nearest
+  *intersection*, and an address in the middle of a long block can be meaningfully closer to an
+  unrelated intersection than to either end of the road it's actually on. Fixed per the
+  user-approved design (Option B from the pre-implementation briefing — Option A, virtual-node
+  insertion, rejected as disproportionate): `nearest_edge_endpoints` (`ox.distance.nearest_edges`,
+  R-tree backed, true road geometry) finds the edge the point sits on and returns both endpoints
+  as candidates; `select_best_endpoints` picks whichever of up to 4 origin×destination
+  combinations gives the cheapest onward route. `load_area()` now also returns the raw
+  `networkx` graph (previously discarded after building the CSR) — `nearest_edges` needs it.
+- **Round 2 — same fix, applied live to the user's exact address, still visibly wrong.** The
+  chosen node was on the *opposite bank of the river* from the pin (Corso Cavour, Verona).
+  Investigation ruled out bad graph data first (`Corso Cavour` is correctly tagged, correctly
+  positioned) before finding the real cause: osmnx collapses any chain of degree-2 nodes into one
+  graph edge regardless of length or name changes — the nearest edge here was a real ~650m merged
+  edge (`['Corso Cavour', 'Ponte della Vittoria', 'Via Generale Armando Diaz', 'Viale della
+  Repubblica']`, `bridge: yes`) whose two endpoints are ~250-290m apart, on opposite banks. Round
+  1's `select_best_endpoints` had no way to know that "picking either candidate" wasn't free — it
+  compared onward-route cost only, with no cost for physically reaching the candidate in the
+  first place. Fixed by adding a real approach cost:
+  - `nearest_edge_endpoints` now returns an `EdgeSnap` (`app/helpers.py`): projects the query
+    point onto the edge's own geometry (its true shape when osmnx recorded one, else a straight
+    line between the endpoints) and splits the edge's travel time proportionally, so each
+    candidate carries a real, non-zero cost to actually reach it.
+  - `select_best_endpoints` now compares **approach + route + approach**, the true total trip —
+    not route cost alone. Verified against the real Corso Cavour/Ponte della Vittoria case: the
+    far (north-bank) candidate is still chosen, and correctly so — its 43.4s approach plus 351.3s
+    route (394.7s total) genuinely beats the near candidate's 34.4s approach plus 429.1s route
+    (463.5s total), because the route from the near side loops back to cross the river anyway.
+    **The original "wrong side of the river" appearance was, for this specific query, a
+    mathematically correct shortcut, not a bug** — but the drawn route never showed the bridge
+    crossing that justified it, which was the real remaining problem (see below).
+  - `EdgeSnap.connector_coords()` gives the sub-path (following real edge geometry, not a
+    straight line) from the query point to whichever endpoint was chosen. `app/main.py` draws
+    this as a distinct dotted-grey segment from the pin to the route, and includes the approach
+    cost in the reported ETA (previously silently dropped even after round 1's fix) with a
+    caption when it's non-trivial (>5s).
+  - `nearest_node` (plain nearest-intersection, no approach cost) is kept for fixed-coordinate
+    callers (debug/benchmark scripts) that don't need this precision.
+  - Golden tests reproduce both the original bug and the interpolation on real data: the Verona
+    fixture's longest edge (~230m, merged street names) has a midpoint whose nearest *node* is
+    neither of that edge's own endpoints (round 1), and querying that midpoint now produces a
+    real non-zero approach cost to each end, with a connector that follows the edge's actual
+    geometry (round 2).
+  - **Known residual limitation, documented not hidden**: still routes node-to-node, not from a
+    literal virtual point mid-edge (Option A); approach-cost interpolation assumes uniform speed
+    along the whole merged edge, which is coarser for long, heterogeneous edges (e.g. a fast
+    bridge plus a slow residential stretch) than for short, uniform ones.
 
 **P2 — performance (measure before/after; scripts exist)**
 4. `app/helpers.py::nearest_node` is a pure-Python loop over all ~41k nodes with a

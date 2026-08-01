@@ -7,9 +7,13 @@ directly stays in main.py instead.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import networkx as nx
 import numpy as np
 import osmnx as ox
+from shapely.geometry import LineString, Point
+from shapely.ops import substring
 
 from router.core.dijkstra import dijkstra
 from router.core.geometry import great_circle_distance_m
@@ -31,51 +35,131 @@ def nearest_node(lat: np.ndarray, lon: np.ndarray, point: tuple[float, float]) -
     return int(np.argmin(distances))
 
 
-def nearest_edge_endpoints(graph: nx.MultiDiGraph, x: float, y: float) -> tuple[int, int]:
-    """The `(u, v)` endpoint node ids of the edge nearest `(x, y)`.
+@dataclass(frozen=True)
+class EdgeSnap:
+    """The edge nearest a query point, and everything needed to route from
+    it and to draw the approach segment connecting the query point to
+    wherever routing actually starts.
+
+    `geometry` and `distance_from_u` are in the same projected CRS as the
+    `(x, y)` passed to `nearest_edge_endpoints`.
+    """
+
+    u: int
+    v: int
+    approach_to_u: float
+    approach_to_v: float
+    geometry: LineString
+    distance_from_u: float
+
+    @property
+    def candidates(self) -> tuple[tuple[int, float], tuple[int, float]]:
+        """`((u, approach_to_u), (v, approach_to_v))`, ready for `select_best_endpoints`."""
+        return (self.u, self.approach_to_u), (self.v, self.approach_to_v)
+
+    def connector_coords(self, chosen_node: int) -> list[tuple[float, float]]:
+        """Projected `(x, y)` points from the query point to `chosen_node`,
+        following the edge's own geometry rather than a straight line —
+        important for a long merged edge (e.g. one that crosses a bridge),
+        where a straight line from the query point to a distant endpoint
+        could cut across whatever the edge actually goes around. Ordered
+        query-point-first, `chosen_node`-last. `chosen_node` must be this
+        snap's `u` or `v`.
+        """
+        if chosen_node == self.v:
+            sub = substring(self.geometry, self.distance_from_u, self.geometry.length)
+            return list(sub.coords)
+        if chosen_node == self.u:
+            sub = substring(self.geometry, 0, self.distance_from_u)
+            coords = list(sub.coords)
+            coords.reverse()
+            return coords
+        raise ValueError(f"node {chosen_node} is not an endpoint of this edge snap")
+
+
+def nearest_edge_endpoints(graph: nx.MultiDiGraph, x: float, y: float) -> EdgeSnap:
+    """The edge nearest `(x, y)`, as an `EdgeSnap`.
 
     `(x, y)` must be in `graph`'s own CRS (projected metres, for a
     `prepare_graph`d graph — see `CSRGraph`'s docstring on why). Unlike
     `nearest_node`, this finds the road the point actually sits on (osmnx's
     `nearest_edges`, R-tree backed, using the edge's true geometry when the
     graph has it) rather than guessing by which intersection happens to be
-    closest — the two frequently disagree for a point mid-block, which is
-    exactly the "wrong starting point for a typed address" bug this fixes.
-    Both `u` and `v` are returned as candidates; which one actually gives
-    the better *route* is a routing question, not a geometry one — see
-    `select_best_endpoints`.
+    closest.
+
+    osmnx collapses any chain of degree-2 nodes (real intersections only
+    become graph nodes where 3+ ways meet) into a single edge, regardless
+    of length or of the street name changing partway through — a merged
+    edge can run hundreds of metres, e.g. a street that continues across a
+    bridge under a different name. When that happens, *both* endpoints can
+    be far from the query point, in different directions, and assuming the
+    point is "basically at" one of them is exactly wrong. The returned
+    approach time — the query point projected onto the edge's own geometry
+    (its true shape, when osmnx recorded one, else a straight line between
+    the endpoints), with the edge's travel time split proportionally at
+    that point — is what lets `select_best_endpoints` weigh "how far is it
+    to actually reach this candidate" against "how good is the route once
+    there", instead of assuming free teleportation to whichever candidate
+    happens to have the cheaper onward route.
     """
-    u, v, _key = ox.distance.nearest_edges(graph, x, y)
-    return u, v
+    u, v, key = ox.distance.nearest_edges(graph, x, y)
+    data = graph.get_edge_data(u, v, key)
+
+    geometry = data.get("geometry")
+    if geometry is None:
+        geometry = LineString(
+            [
+                (graph.nodes[u]["x"], graph.nodes[u]["y"]),
+                (graph.nodes[v]["x"], graph.nodes[v]["y"]),
+            ]
+        )
+
+    total_length = geometry.length
+    distance_from_u = geometry.project(Point(x, y))
+    fraction_from_u = distance_from_u / total_length if total_length > 0 else 0.5
+
+    travel_time = float(data["travel_time"])
+    approach_to_u = travel_time * fraction_from_u
+    approach_to_v = travel_time * (1.0 - fraction_from_u)
+
+    return EdgeSnap(
+        u=u,
+        v=v,
+        approach_to_u=approach_to_u,
+        approach_to_v=approach_to_v,
+        geometry=geometry,
+        distance_from_u=distance_from_u,
+    )
 
 
 def select_best_endpoints(
     indptr: np.ndarray,
     indices: np.ndarray,
     weights: np.ndarray,
-    origin_candidates: tuple[int, int],
-    destination_candidates: tuple[int, int],
+    origin_candidates: tuple[tuple[int, float], tuple[int, float]],
+    destination_candidates: tuple[tuple[int, float], tuple[int, float]],
 ) -> tuple[int, int]:
-    """Pick whichever origin/destination candidate pair gives the cheapest route.
+    """Pick whichever origin/destination candidate pair gives the cheapest total trip.
 
-    `nearest_edge_endpoints` gives two plausible nodes on each end (the
-    queried point could be closer to either end of its nearest edge, and
-    the *closer* one isn't always the one that leads to the *faster*
-    route — a one-way street or a slower local road can make the farther
-    node the better choice). Checks all four combinations of the up-to-two
-    origin candidates and up-to-two destination candidates, using only two
-    full-graph Dijkstra runs (one per origin candidate; each with no
-    target computes distances to every node at once, covering both
-    destination candidates in the same pass) rather than up to four.
+    Each candidate is `(node, approach_cost)` from `nearest_edge_endpoints`
+    — `approach_cost` estimates the time to actually reach that node from
+    the true queried point, so a long merged edge's two endpoints are
+    compared on *total* cost (approach + route + approach), not assumed
+    equally reachable. The closer candidate isn't always the better one
+    even so — a one-way street or a slower local road can make the
+    farther-to-reach node the better overall choice — so all four
+    combinations of the up-to-two origin and up-to-two destination
+    candidates are checked, using only two full-graph Dijkstra runs (one
+    per origin candidate; each with no target computes distances to every
+    node at once, covering both destination candidates per run) rather
+    than four.
     """
-    origins = list(dict.fromkeys(origin_candidates))
-    destinations = list(dict.fromkeys(destination_candidates))
-
-    best_origin, best_destination, best_cost = origins[0], destinations[0], float("inf")
-    for origin in origins:
+    best_origin, best_destination = origin_candidates[0][0], destination_candidates[0][0]
+    best_cost = float("inf")
+    for origin, origin_approach in origin_candidates:
         result = dijkstra(indptr, indices, weights, source=origin)
-        for destination in destinations:
-            cost = float(result.dist[destination])
+        for destination, destination_approach in destination_candidates:
+            cost = origin_approach + float(result.dist[destination]) + destination_approach
             if cost < best_cost:
                 best_origin, best_destination, best_cost = origin, destination, cost
 
