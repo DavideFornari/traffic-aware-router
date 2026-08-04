@@ -196,6 +196,21 @@ k paths is folded back in.
   even a 2.8 km in-town trip whose own streets top out around 50 km/h — a real, measured instance
   of this pulled in 20% of the graph's nodes and produced 2,832 traffic-sampling probes for what
   should have been a small corridor. A deliberate soundness-over-tightness tradeoff, not a bug.
+  The UI exposes three labelled alternatives for `v_max`/`l_max`, only the first of which keeps
+  the proof above — each trades some of it away for a smaller corridor, and says so on screen:
+  - **Strict max speed** (default) — as described above; the only *proven* bound.
+  - **95th percentile speed** (`max_speed_kph(graph, percentile=95)`) — drops the fastest 5% of
+    edges from `v_max`. On Verona's extract this shrank the same 2.8 km trip's corridor from
+    8,446 to 2,805 nodes (2,832 → 876 probes) — but a route that genuinely needs one of those
+    excluded edges could now be missed.
+  - **Distance-only** (`ellipse_l_max_distance`, `(1 + epsilon) * straight-line distance`) — drops
+    the time/velocity term entirely. Smallest corridor by far (739 nodes / 225 probes for the same
+    trip) and the least justified: the ring-road counterexample in `ellipse_l_max`'s own docstring
+    applies directly, since this is exactly the distance-based bound that docstring warns against.
+  - A separate **"exclude motorway"** checkbox (`max_speed_kph(..., exclude_motorway=True)`) drops
+    `motorway`/`motorway_link` edges from whichever of the two speed-based `v_max` calculations is
+    selected — the direct fix for the A4 scenario above (8,446 → 6,700 nodes on the same trip).
+    No effect on distance-only sizing, which never looks at `v_max`.
 - `in_ellipse` — the focal definition of an ellipse (sum of distances to the two foci at most
   `l_max`) applied directly to projected node coordinates, needing no center, rotation, or
   semi-axis lengths.
