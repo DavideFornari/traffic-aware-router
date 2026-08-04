@@ -198,6 +198,25 @@ noting for future state-machine widgets in this app:
   script run's widget labels before that change takes effect — the button's own new label
   lags one rerun behind unless the handler calls `st.rerun()` immediately, which it does.
 
+**Done (2026-08-04, user-reported responsiveness bug)** — user reported the pick-origin/
+pick-destination buttons above "felt unresponsive," requiring a second click before a map
+pick took visible effect. Root cause: the *same* one-rerun-lag class already fixed for the
+pick buttons' own labels (see the note directly above) was never applied to the click-
+consumption path itself. `apply_map_click` correctly updated `st.session_state.origin`/
+`pick_mode`, but the picker map's marker and center had already been drawn earlier in that
+same script run from the pre-click values — so the correct state existed in `session_state`
+but nothing forced a redraw to show it, and the visible update only appeared once some later,
+unrelated interaction triggered the next rerun. Confirmed live (Chrome automation against the
+running app, reading actual DOM/session state, not just screenshots): a single map click left
+the marker in place and the button still reading "Click the map…" until a second click landed.
+Fixed in `app/main.py`: call `st.rerun()` immediately once a click actually consumes an active
+pick mode (`prior_pick_mode is not None and click_result.pick_mode is None`), gated so it never
+fires for clicks that don't change pick state (plain panning/zooming, or a click while inactive)
+and so it can't loop. Re-verified live after the fix: one click now moves the marker, updates
+the origin/destination caption and text field, and resets the button label, all in a single
+round trip. 178 tests still pass; no test coverage added because the bug was in *rerun timing*,
+which `AppTest`/pytest can't observe — it only showed up interacting with the real component.
+
 **Done (2026-08-01, performance)** — a live test with a real TomTom key showed a single route
 computation taking ~20s+, dominated by `apply_traffic` querying TomTom **sequentially**, one
 blocking HTTP call per sampled probe (a real corridor can sample thousands — e.g. 2,832 probes
