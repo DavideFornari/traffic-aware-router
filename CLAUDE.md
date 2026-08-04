@@ -260,6 +260,37 @@ bound's assumptions, which this extends. If probe *cost* rather than proof stren
 priority, capping `sample_probe_points`' total probe count (growing `spacing_m` to fit) is a
 safer lever than touching `v_max`.
 
+**Done (2026-08-04, `feature/ellipse-modes` branch, user-requested)** — the tradeoff above is
+still true and the strict default is unchanged, but it's no longer the only option: the user
+asked for it to become a choice rather than a fixed decision, specifically for smaller areas
+like Verona where the strict bound's looseness is easy to demonstrate and easy to live with
+trading away. Three points on the same **soundness ↔ corridor size** spectrum, chosen via a
+sidebar radio (`app/main.py`'s "Ellipse sizing"), each labelled with what it gives up:
+- **Strict max speed** (unchanged default) — the only *proven* bound; see above.
+- **95th percentile speed** — `max_speed_kph(graph, percentile=95)` (`graph/prepare.py`). Can
+  exclude a genuinely-needed fast edge from the ellipse.
+- **Distance-only** — new `ellipse_l_max_distance(straight_line_m, epsilon)`
+  (`corridor/ellipse.py`), `(1 + epsilon) * straight-line distance`, no `t_star`/`v_max` at all.
+  This is precisely the distance-based bound `ellipse_l_max`'s own docstring warns is unsound
+  (the ring-road counterexample) — kept as an explicit, labelled option, never a silent default.
+  `build_corridor` gained `ellipse_mode: Literal["time_budget", "distance_only"]` to select it.
+
+Plus an independent **"exclude motorway"** checkbox — `max_speed_kph(..., exclude_motorway=True)`
+drops `highway in {motorway, motorway_link}` edges before computing `v_max`, the direct fix for
+the A4 scenario two paragraphs up. Applies to the two speed-based modes only; a no-op under
+distance-only sizing, which the UI greys the checkbox out for.
+
+Measured on the same Piazza Bra → Stadio Bentegodi trip (2.8 km, `t_star` 355.6s): strict max
+8,446 corridor nodes / 2,832 probes (baseline, unchanged) → strict + exclude-motorway 6,700 /
+2,261 → 95th percentile 2,805 / 876 → distance-only 739 / 225. Free-flow ETA was identical across
+all four (expected: the free-flow first pass is a full-graph Dijkstra, independent of corridor
+size) — verified live via Chrome automation against the running app, not just unit tests.
+`prepare.py::max_speed_kph`, `ellipse.py::ellipse_l_max_distance`, and
+`pipeline.py::build_corridor`'s new `ellipse_mode` param each got unit tests (10 new; 188 total).
+No AppTest coverage for the new sidebar controls themselves — consistent with the rest of
+`app/main.py`, which isn't AppTest-covered either (see the earlier UX-fix note on why the
+rerun-lag class of bug specifically can't be caught by AppTest/pytest).
+
 **P2 — performance (measure before/after; scripts exist)**
 4. `app/helpers.py::nearest_node` is a pure-Python loop over all ~41k nodes with a
    haversine call each — two calls per query. Vectorise with numpy (or KDTree on

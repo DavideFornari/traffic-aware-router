@@ -76,6 +76,46 @@ def test_first_candidate_path_cost_equals_t_star(csr):
     assert result.candidate_costs[0] == pytest.approx(result.t_star, rel=1e-6)
 
 
+def test_distance_only_ellipse_mode_also_contains_origin_and_destination(csr):
+    graph, v_max = csr
+    origin = int(np.searchsorted(graph.node_ids, ORIGIN_ID))
+    destination = int(np.searchsorted(graph.node_ids, DESTINATION_ID))
+
+    result = build_corridor(
+        graph.indptr,
+        graph.indices,
+        graph.weights,
+        graph.x,
+        graph.y,
+        origin,
+        destination,
+        v_max,
+        ellipse_mode="distance_only",
+    )
+
+    assert origin in result.subgraph.sub_to_full
+    assert destination in result.subgraph.sub_to_full
+
+
+def test_unknown_ellipse_mode_raises(csr):
+    graph, v_max = csr
+    origin = int(np.searchsorted(graph.node_ids, ORIGIN_ID))
+    destination = int(np.searchsorted(graph.node_ids, DESTINATION_ID))
+
+    with pytest.raises(ValueError, match="ellipse_mode"):
+        build_corridor(
+            graph.indptr,
+            graph.indices,
+            graph.weights,
+            graph.x,
+            graph.y,
+            origin,
+            destination,
+            v_max,
+            ellipse_mode="bogus",
+        )
+
+
 def test_no_path_between_origin_and_destination_raises():
     # two disconnected nodes: 0 has no edges at all.
     indptr = np.array([0, 0, 0])

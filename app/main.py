@@ -58,7 +58,6 @@ def load_area(place: str):
     raw = load_graph(AreaConfig(place=place))
     graph = prepare_graph(raw)
     csr = build_csr(graph)
-    v_max_mps = max_speed_kph(graph) * 1000 / 3600
     to_wgs84 = Transformer.from_crs(graph.graph["crs"], "EPSG:4326", always_xy=True)
     to_projected = Transformer.from_crs("EPSG:4326", graph.graph["crs"], always_xy=True)
 
@@ -75,7 +74,7 @@ def load_area(place: str):
         # fallback — a missing external service degrades, never blocks.
         restrictions = []
 
-    return csr, graph, v_max_mps, to_wgs84, to_projected, restrictions
+    return csr, graph, to_wgs84, to_projected, restrictions
 
 
 def geocode(query: str) -> tuple[float, float] | None:
@@ -103,6 +102,11 @@ def render_result() -> None:
     metric_cols[0].metric("Free-flow ETA", format_duration(result["free_flow_eta"]))
     metric_cols[1].metric("Traffic-aware ETA", format_duration(result["traffic_eta"]))
     metric_cols[2].metric("Delta", format_delta(result["traffic_eta"] - result["free_flow_eta"]))
+
+    st.caption(
+        f"Ellipse sizing: {result['ellipse_sizing_label']} — corridor has "
+        f"{result['corridor_node_count']:,} nodes."
+    )
 
     if not result["traffic_key_available"]:
         st.warning(result["traffic_status"])
@@ -210,6 +214,29 @@ def main() -> None:
         epsilon = st.slider("Ellipse epsilon", 0.0, 1.0, 0.3, 0.05)
         k = st.slider("Yen's k candidate paths", 1, 8, 4)
 
+        ellipse_sizing = st.radio(
+            "Ellipse sizing",
+            [
+                "Strict max speed (proven bound)",
+                "95th percentile speed (looser proof)",
+                "Distance-only (ignores speed/time)",
+            ],
+            index=0,
+            help="How the corridor's ellipse bound is sized — see README's Corridor "
+            "section. Only the first option is a *proven* bound: it can never exclude "
+            "a free-flow-optimal route. The other two trade that proof for a smaller "
+            "corridor and are labelled as such throughout the UI.",
+        )
+        exclude_motorway = st.checkbox(
+            "Exclude motorway edges from v_max",
+            value=False,
+            disabled=ellipse_sizing.startswith("Distance-only"),
+            help="A single fast motorway edge anywhere in the loaded area sets v_max "
+            "for every trip, however local (see README) — this drops motorway/"
+            "motorway_link edges before computing it. No effect on distance-only "
+            "sizing, which doesn't use v_max at all.",
+        )
+
         st.header("Traffic")
         env_key = os.environ.get("TOMTOM_API_KEY")
         use_env_key = st.toggle(
@@ -273,11 +300,27 @@ def main() -> None:
                 else:
                     st.warning(f"Couldn't find {destination_query!r}.")
 
-    csr, graph, v_max_mps, to_wgs84_t, to_projected_t, restrictions = load_area(place)
+    csr, graph, to_wgs84_t, to_projected_t, restrictions = load_area(place)
     st.caption(
         f"Loaded {csr.n_nodes:,} nodes, {csr.n_edges:,} edges, "
         f"{len(restrictions):,} turn restrictions."
     )
+
+    # Cheap (single pass over already-loaded edges), so recomputed straight
+    # from the toggles above rather than baked into load_area's cache — the
+    # v_max/exclude_motorway choice can change every rerun without
+    # re-downloading or re-preparing the graph.
+    if ellipse_sizing == "Distance-only (ignores speed/time)":
+        ellipse_mode = "distance_only"
+        v_max_mps = max_speed_kph(graph) * 1000 / 3600  # unused by build_corridor in this mode
+    else:
+        ellipse_mode = "time_budget"
+        speed_percentile = 95 if ellipse_sizing.startswith("95th percentile") else None
+        v_max_mps = (
+            max_speed_kph(graph, percentile=speed_percentile, exclude_motorway=exclude_motorway)
+            * 1000
+            / 3600
+        )
 
     if st.session_state.pick_mode:
         st.info(f"Click the map to set the {st.session_state.pick_mode.lower()}.")
@@ -384,6 +427,7 @@ def main() -> None:
                     epsilon=epsilon,
                     k=k,
                     edge_keys=csr.edge_keys,
+                    ellipse_mode=ellipse_mode,
                 )
 
                 client = TomTomClient(api_key=api_key or None)
@@ -520,6 +564,8 @@ def main() -> None:
                     "approach_total": approach_total,
                     "origin_connector_latlon": origin_connector_latlon,
                     "destination_connector_latlon": destination_connector_latlon,
+                    "ellipse_sizing_label": ellipse_sizing,
+                    "corridor_node_count": corridor.subgraph.n_nodes,
                 }
 
     render_result()

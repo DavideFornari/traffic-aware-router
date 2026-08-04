@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from router.corridor.ellipse import ellipse_l_max, in_ellipse
+from router.corridor.ellipse import ellipse_l_max, ellipse_l_max_distance, in_ellipse
 
 
 def test_l_max_scales_with_epsilon_and_v_max():
@@ -18,6 +18,18 @@ def test_l_max_rejects_non_positive_inputs():
         ellipse_l_max(t_star=100.0, epsilon=0.3, v_max=0.0)
     with pytest.raises(ValueError):
         ellipse_l_max(t_star=100.0, epsilon=-0.1, v_max=10.0)
+
+
+def test_l_max_distance_scales_with_epsilon():
+    assert ellipse_l_max_distance(straight_line_m=1000.0, epsilon=0.0) == pytest.approx(1000.0)
+    assert ellipse_l_max_distance(straight_line_m=1000.0, epsilon=0.3) == pytest.approx(1300.0)
+
+
+def test_l_max_distance_rejects_non_positive_inputs():
+    with pytest.raises(ValueError):
+        ellipse_l_max_distance(straight_line_m=0.0, epsilon=0.3)
+    with pytest.raises(ValueError):
+        ellipse_l_max_distance(straight_line_m=1000.0, epsilon=-0.1)
 
 
 def test_focus_points_are_always_inside():

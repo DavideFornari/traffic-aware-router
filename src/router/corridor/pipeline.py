@@ -19,12 +19,17 @@ from shapely.geometry.base import BaseGeometry
 from router.core.dijkstra import dijkstra
 from router.core.yen import yen_k_shortest_paths
 from router.corridor.buffer import buffered_path_union, nodes_in_polygon
-from router.corridor.ellipse import ellipse_l_max, in_ellipse
+from router.corridor.ellipse import ellipse_l_max, ellipse_l_max_distance, in_ellipse
 from router.corridor.subgraph import Subgraph, extract_subgraph
 
 DEFAULT_EPSILON = 0.3
 DEFAULT_K = 4
 DEFAULT_BUFFER_M = 200.0
+
+# "time_budget" (default) is the proven bound: (1+epsilon) * t_star * v_max.
+# "distance_only" drops v_max/t_star entirely: (1+epsilon) * straight_line
+# distance — a heuristic, not a proof; see ellipse_l_max_distance's docstring.
+ELLIPSE_MODES = ("time_budget", "distance_only")
 
 
 @dataclass(frozen=True)
@@ -63,22 +68,34 @@ def build_corridor(
     k: int = DEFAULT_K,
     buffer_m: float = DEFAULT_BUFFER_M,
     edge_keys: list[tuple[int, int, int]] | None = None,
+    ellipse_mode: str = "time_budget",
 ) -> CorridorResult:
     """Build the traffic-sampling corridor between `origin` and `destination`.
 
     `x`/`y` must be projected metres (see `router.graph.csr.CSRGraph`'s
     docstring); `v_max` must be in the same distance/time units as
-    `weights` (metres and seconds, for OSM travel times). `edge_keys`,
+    `weights` (metres and seconds, for OSM travel times) — used only when
+    `ellipse_mode="time_budget"` (the default and only *proven* bound; see
+    `ellipse_l_max`'s docstring). `ellipse_mode="distance_only"` ignores
+    `v_max`/`t_star` and uses `ellipse_l_max_distance` instead — a smaller
+    but unproven corridor, see that function's docstring. `edge_keys`,
     if given (e.g. `CSRGraph.edge_keys`), is carried through onto
     `CorridorResult.subgraph.edge_keys` — needed to map the corridor back
     onto real OSM edges, e.g. to apply turn restrictions on the second pass.
     """
+    if ellipse_mode not in ELLIPSE_MODES:
+        raise ValueError(f"ellipse_mode must be one of {ELLIPSE_MODES}, got {ellipse_mode!r}")
+
     first_pass = dijkstra(indptr, indices, weights, source=origin, target=destination)
     t_star = float(first_pass.dist[destination])
     if math.isinf(t_star):
         raise ValueError("No path exists between origin and destination.")
 
-    l_max = ellipse_l_max(t_star, epsilon, v_max)
+    if ellipse_mode == "time_budget":
+        l_max = ellipse_l_max(t_star, epsilon, v_max)
+    else:
+        straight_line_m = math.hypot(x[destination] - x[origin], y[destination] - y[origin])
+        l_max = ellipse_l_max_distance(straight_line_m, epsilon)
     ellipse_mask = in_ellipse(x, y, (x[origin], y[origin]), (x[destination], y[destination]), l_max)
     ellipse_mask[origin] = True
     ellipse_mask[destination] = True

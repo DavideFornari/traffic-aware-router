@@ -30,6 +30,25 @@ def ellipse_l_max(t_star: float, epsilon: float, v_max: float) -> float:
     return (1.0 + epsilon) * t_star * v_max
 
 
+def ellipse_l_max_distance(straight_line_m: float, epsilon: float) -> float:
+    """Major-axis bound as `(1 + epsilon)` times the straight-line origin-destination distance.
+
+    Unlike `ellipse_l_max`, this has **no time or velocity term at all** and
+    is **not a proven bound** on free-flow-optimal routes: a route that
+    legitimately detours to save time (a ring road is the canonical example
+    `ellipse_l_max`'s own docstring warns about) can be longer in metres
+    than `(1 + epsilon)` times the straight-line distance and would be
+    wrongly excluded here. It exists as an explicit, labelled alternative in
+    the UI's ellipse-mode toggle for comparing corridor size against the
+    provable `ellipse_l_max` — never used as its silent replacement.
+    """
+    if straight_line_m <= 0:
+        raise ValueError("straight_line_m must be positive.")
+    if epsilon < 0:
+        raise ValueError("epsilon must be non-negative.")
+    return (1.0 + epsilon) * straight_line_m
+
+
 def in_ellipse(
     x: np.ndarray,
     y: np.ndarray,
