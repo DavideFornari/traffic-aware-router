@@ -295,6 +295,7 @@ def main() -> None:
     if click and click.get("last_clicked"):
         clicked = (click["last_clicked"]["lat"], click["last_clicked"]["lng"])
 
+    prior_pick_mode = st.session_state.pick_mode
     click_result = apply_map_click(
         clicked,
         st.session_state.last_map_click,
@@ -302,10 +303,17 @@ def main() -> None:
         st.session_state.origin,
         st.session_state.destination,
     )
+    picked_something = prior_pick_mode is not None and click_result.pick_mode is None
     st.session_state.origin = click_result.origin
     st.session_state.destination = click_result.destination
     st.session_state.last_map_click = click_result.last_map_click
     st.session_state.pick_mode = click_result.pick_mode
+    if picked_something:
+        # The marker and picker-map center were already drawn above from the
+        # *old* origin/destination this run — without an immediate rerun the
+        # pick only becomes visible after some later, unrelated interaction
+        # forces the next one (same lag the pick buttons' own labels had).
+        st.rerun()
 
     manual_col1, manual_col2 = st.columns(2)
     origin_text = manual_col1.text_input(
