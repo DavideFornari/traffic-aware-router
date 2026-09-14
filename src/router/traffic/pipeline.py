@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from router.core.csr_utils import edge_position
 from router.traffic.cache import TrafficCache
 from router.traffic.client import FlowSegment, TomTomAPIError, TomTomClient
 from router.traffic.matching import (
@@ -62,13 +63,6 @@ class TrafficResult:
     @property
     def traffic_available(self) -> bool:
         return self.probes_matched > 0
-
-
-def _edge_position(indptr: np.ndarray, indices: np.ndarray, u: int, v: int) -> int | None:
-    for pos in range(indptr[u], indptr[u + 1]):
-        if indices[pos] == v:
-            return pos
-    return None
 
 
 def apply_traffic(
@@ -163,8 +157,8 @@ def apply_traffic(
         # a dual carriageway's two directions never share a node pair, so
         # this only ever applies to genuinely bidirectional single roads.
         for pos in (
-            _edge_position(indptr, indices, probe.u, probe.v),
-            _edge_position(indptr, indices, probe.v, probe.u),
+            edge_position(indptr, indices, probe.u, probe.v),
+            edge_position(indptr, indices, probe.v, probe.u),
         ):
             if pos is not None:
                 adjusted_weights[pos] = weights[pos] / factor

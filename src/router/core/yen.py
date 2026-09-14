@@ -20,14 +20,8 @@ from itertools import pairwise
 
 import numpy as np
 
+from router.core.csr_utils import edge_position
 from router.core.dijkstra import INF, dijkstra, reconstruct_path
-
-
-def _edge_position(indptr: np.ndarray, indices: np.ndarray, u: int, v: int) -> int | None:
-    for pos in range(indptr[u], indptr[u + 1]):
-        if indices[pos] == v:
-            return pos
-    return None
 
 
 def _path_cost(
@@ -35,7 +29,7 @@ def _path_cost(
 ) -> float:
     total = 0.0
     for u, v in pairwise(path):
-        pos = _edge_position(indptr, indices, u, v)
+        pos = edge_position(indptr, indices, u, v)
         total += weights[pos]
     return total
 
@@ -74,7 +68,7 @@ def yen_k_shortest_paths(
             blocked_weights = weights.copy()
             for path in accepted:
                 if path[: i + 1] == root_path:
-                    pos = _edge_position(indptr, indices, path[i], path[i + 1])
+                    pos = edge_position(indptr, indices, path[i], path[i + 1])
                     if pos is not None:
                         blocked_weights[pos] = INF
 

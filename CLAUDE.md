@@ -304,9 +304,19 @@ user-facing path, was already fast via osmnx's R-tree. No new tests needed; exis
 `test_nearest_node_picks_the_closest_point` and the snapping golden tests cover correctness
 of the vectorised formula unchanged.
 
+**Done (2026-09-14, performance)** — item 5 below: `_edge_position` was duplicated verbatim
+in `core/yen.py` and `traffic/pipeline.py`, each a linear scan of a CSR row. Deduplicated
+into `router.core.csr_utils.edge_position` — a new module rather than adding it to
+`dijkstra.py`/`geometry.py`, since it's a CSR-array primitive shared by the routing core
+*and* the traffic layer, not specific to either. Both out-edge builders (`csr.py::build_csr`
+and `corridor/subgraph.py::extract_subgraph`) already sort each row by target index, so the
+scan became an `np.searchsorted` binary search instead of a Python `range` loop. New unit
+tests (`tests/core/test_csr_utils.py`, 4 tests: start/middle/end of a row, missing target,
+empty row, correct row among several) — this is a new module, so it gets its own coverage
+even though it's a small helper; `yen.py`'s and `pipeline.py`'s existing tests already
+exercise it indirectly and needed no changes. 192 tests total.
+
 **P2 — performance (measure before/after; scripts exist)**
-5. `_edge_position` (duplicated in `core/yen.py` and `traffic/pipeline.py`) is a linear
-   scan; row indices are sorted, so `np.searchsorted` works. Deduplicate into one helper.
 6. Yen copies the full weight array per spur (`weights.copy()` — O(E) each); the
    non-negativity check in `dijkstra` also rescans O(E) per spur call. Hoist the check;
    restore-in-place instead of copying if profiling justifies it.
