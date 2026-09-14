@@ -42,14 +42,24 @@ def dijkstra(
     weights: np.ndarray,
     source: int,
     target: int | None = None,
+    validate: bool = True,
 ) -> ShortestPaths:
     """Single-source shortest paths from `source`.
 
     If `target` is given, the search stops as soon as `target` is settled
     (its distance is then final; other entries may be partial/incomplete).
     Edge `weights` must be non-negative — see module docstring.
+
+    `validate` re-scans `weights` for negative entries on every call (O(E)),
+    which Yen's algorithm (`core/yen.py`) would otherwise pay once per spur
+    on top of its own O(E) work. Callers that already know `weights` is
+    non-negative — because they validated it themselves and only ever raise
+    entries towards `INF` afterwards, never lower them — may pass
+    `validate=False` to skip the re-check. Leave it `True` unless you can
+    make that argument; it's the only thing standing between a caller
+    passing bad data and a wrong-but-silent result (see module docstring).
     """
-    if np.any(weights < 0):
+    if validate and np.any(weights < 0):
         raise ValueError("Dijkstra requires non-negative edge weights.")
 
     n = len(indptr) - 1

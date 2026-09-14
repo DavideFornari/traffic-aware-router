@@ -316,10 +316,27 @@ empty row, correct row among several) — this is a new module, so it gets its o
 even though it's a small helper; `yen.py`'s and `pipeline.py`'s existing tests already
 exercise it indirectly and needed no changes. 192 tests total.
 
+**Done (2026-09-14, performance, measured negligible real-world gain — kept anyway)** —
+item 6 below, both halves: `dijkstra()` gained a `validate: bool = True` parameter; Yen now
+validates `weights` once up front and calls every spur search with `validate=False`, since it
+only ever raises entries to `INF` afterwards. `weights.copy()` per spur was replaced with an
+in-place block/restore (save the handful of edge positions and node out-degree row ranges
+about to be set to `INF`, restore them from a `try`/`finally` after the spur's `dijkstra` call
+returns) — no full-array allocation or copy per spur at all now. **Measured, honestly**: on
+the real Verona corridor (strict-mode ellipse, 18,344 edges, k=8) the old and new
+implementations were statistically indistinguishable (~0.22s either way over 20 runs); even on
+a synthetic 100k-node/400k-edge graph with k=10, old and new were both ~12s, within noise of
+each other. The O(E) copy this removes is real, but it's dwarfed by each spur's own O(E log V)
+Dijkstra search — the copy was never the bottleneck the backlog wording assumed. Kept the
+change anyway: it's strictly less work per spur (no redundant re-validation, no allocation),
+it's not slower on any benchmark tried, and `weights` mutation is now documented (see
+`yen_k_shortest_paths`'s docstring) rather than silently copied — a caller relying on
+implicit copy semantics would have been relying on an accident, not a contract. 192 tests
+still pass (existing `test_yen.py`/`test_yen_property.py`/golden tests catch any correctness
+regression from the block/restore path; no new tests added since the observable behavior is
+unchanged — same paths, same costs, `weights` restored bit-identical on return).
+
 **P2 — performance (measure before/after; scripts exist)**
-6. Yen copies the full weight array per spur (`weights.copy()` — O(E) each); the
-   non-negativity check in `dijkstra` also rescans O(E) per spur call. Hoist the check;
-   restore-in-place instead of copying if profiling justifies it.
 7. The corridor layer in `app/main.py` adds one `folium.PolyLine` per edge (thousands of
    objects; slow render). Batch into a single GeoJson/MultiLineString layer.
 
