@@ -16,7 +16,7 @@ Every commit leaves lint green, tests green, and the app runnable — no excepti
 
 - Windows 11. The venv is `.venv` (CPython 3.14). `make` is not available in every shell
   here — prefer the underlying commands:
-  - Tests: `.venv/Scripts/python.exe -m pytest -q` (178 tests, ~5 s; all must pass)
+  - Tests: `.venv/Scripts/python.exe -m pytest -q` (188 tests, ~50 s; all must pass)
   - Lint: `.venv/Scripts/python.exe -m ruff check .` (`--fix` for autofixable)
   - Format: `.venv/Scripts/python.exe -m ruff format .`
   - App: `.venv/Scripts/python.exe -m streamlit run app/main.py`
