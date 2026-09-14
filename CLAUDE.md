@@ -351,9 +351,18 @@ correctly, both layers present and independently toggleable in the layer control
 console errors. 194 tests total (2 new for the helper: lat/lon-to-lon/lat flip, and the
 empty-input case).
 
-**P3 — hygiene, docs, robustness**
-8. `Makefile` `venv` target installs only `.[dev]`; README's "Try it" needs
-   `.[dev,viz,app]`. Align them (e.g. a `make app` target) so both documented paths work.
+**Done (2026-09-14, hygiene)** — item 8 below: `make venv` was left installing `.[dev]` only
+(kept exactly as-is, matching CI byte-for-byte — see the new comment in the Makefile) rather
+than widened, since lint/format/test genuinely never need `folium`/`streamlit`/`matplotlib`
+and CI shouldn't either (invariant 7). Instead added a new `make app` target — depends on
+`venv`, then `pip install -e ".[dev,viz,app]"` and `streamlit run app/main.py` — so README's
+"Try it" instructions (the `pip install -e ".[dev,viz,app]"` + `streamlit run` two-liner) are
+also runnable as one `make` command instead of only existing as prose. README's "Try it"
+section now mentions both paths. Not runnable end-to-end in this session's shell (`make` isn't
+on PATH here, matching the environment note above), so verified indirectly: the underlying
+`pip`/`streamlit` commands are unchanged from what already works today, and the `.[dev,viz,app]`
+extras are already installed and importable in `.venv`.
+
 9. `app/__init__.py` still says "Implemented in Milestone 7" — stale scaffold comment.
 10. `download.py::_cache_key` ignores the osmnx version; a graph cached by one osmnx
     major version may deserialize oddly under another. Include `ox.__version__` in the key.

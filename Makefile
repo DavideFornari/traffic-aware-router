@@ -1,4 +1,4 @@
-.PHONY: venv lint format test
+.PHONY: venv lint format test app
 
 VENV := .venv
 
@@ -8,6 +8,8 @@ else
 	PYTHON := $(VENV)/bin/python
 endif
 
+# .[dev] only, matching CI (.github/workflows/ci.yml) exactly — lint/format/test
+# never need folium/streamlit/matplotlib, and CI shouldn't either (see CLAUDE.md).
 venv:
 	python3 -m venv $(VENV)
 	$(PYTHON) -m pip install --upgrade pip
@@ -24,3 +26,9 @@ format:
 
 test:
 	$(PYTHON) -m pytest
+
+# README's "Try it" path (pip install -e ".[dev,viz,app]" && streamlit run
+# app/main.py) as a single command, so both documented setups actually work.
+app: venv
+	$(PYTHON) -m pip install -e ".[dev,viz,app]"
+	$(PYTHON) -m streamlit run app/main.py

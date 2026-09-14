@@ -31,6 +31,8 @@ pip install -e ".[dev,viz,app]"
 streamlit run app/main.py
 ```
 
+Or, if you have `make` (creates/updates `.venv` first): `make app`.
+
 First load downloads and caches the default area's road network (a minute or two); after that,
 `streamlit run` is fast. No TomTom key needed to try it — the sidebar has an optional field for
 one, or copy `.env.example` to `.env` and it's picked up automatically (see Development below).
