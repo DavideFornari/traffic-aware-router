@@ -26,6 +26,7 @@ from streamlit_folium import st_folium
 
 from app.helpers import (
     apply_map_click,
+    edges_to_multiline_geojson,
     format_delta,
     format_duration,
     nearest_edge_endpoints,
@@ -142,16 +143,22 @@ def render_result() -> None:
         result["destination_latlon"], tooltip="Destination", icon=folium.Icon(color="red")
     ).add_to(result_map)
 
-    corridor_layer = folium.FeatureGroup(name="Corridor")
-    for start, end in result["corridor_edges_latlon"]:
-        folium.PolyLine([start, end], color="#999999", weight=1, opacity=0.4).add_to(corridor_layer)
-    corridor_layer.add_to(result_map)
+    # One folium.PolyLine per edge used to mean thousands of separate Leaflet
+    # objects for a real corridor — slow to render. A single GeoJson layer
+    # with a MultiLineString geometry draws the same segments in one object.
+    if result["corridor_edges_latlon"]:
+        folium.GeoJson(
+            edges_to_multiline_geojson(result["corridor_edges_latlon"]),
+            name="Corridor",
+            style_function=lambda _: {"color": "#999999", "weight": 1, "opacity": 0.4},
+        ).add_to(result_map)
 
     if result["live_edges_latlon"]:
-        live_layer = folium.FeatureGroup(name="Live traffic data")
-        for start, end in result["live_edges_latlon"]:
-            folium.PolyLine([start, end], color="#e6a817", weight=4, opacity=0.8).add_to(live_layer)
-        live_layer.add_to(result_map)
+        folium.GeoJson(
+            edges_to_multiline_geojson(result["live_edges_latlon"]),
+            name="Live traffic data",
+            style_function=lambda _: {"color": "#e6a817", "weight": 4, "opacity": 0.8},
+        ).add_to(result_map)
 
     # Approach segments: pin -> nearest routable node, following the snapped
     # edge's own geometry. Deliberately styled distinctly from the routed

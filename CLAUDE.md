@@ -336,9 +336,20 @@ still pass (existing `test_yen.py`/`test_yen_property.py`/golden tests catch any
 regression from the block/restore path; no new tests added since the observable behavior is
 unchanged — same paths, same costs, `weights` restored bit-identical on return).
 
-**P2 — performance (measure before/after; scripts exist)**
-7. The corridor layer in `app/main.py` adds one `folium.PolyLine` per edge (thousands of
-   objects; slow render). Batch into a single GeoJson/MultiLineString layer.
+**Done (2026-09-14, performance)** — item 7 below, the last of the original P2 list:
+`app/main.py`'s corridor and live-traffic map layers each added one `folium.PolyLine` per
+edge — thousands of separate Leaflet objects for a real corridor (8,446 nodes / ~18k edges
+for the default Piazza Bra → Stadio Bentegodi trip). Replaced with
+`app/helpers.py::edges_to_multiline_geojson` (new, unit-tested: flips `(lat, lon)` to
+GeoJSON's `(lon, lat)` order once, in one place, rather than at every call site) plus a
+single `folium.GeoJson(..., style_function=...)` per layer instead of a loop of
+`folium.PolyLine`s. Each layer is still a separate, independently toggleable
+`folium.GeoJson` object, so `folium.LayerControl`'s "Corridor" / "Live traffic data"
+checkboxes keep working exactly as before — verified live (Chrome automation against the
+running app, real TomTom key, 723/2832 probes matched): route computed and rendered
+correctly, both layers present and independently toggleable in the layer control, zero
+console errors. 194 tests total (2 new for the helper: lat/lon-to-lon/lat flip, and the
+empty-input case).
 
 **P3 — hygiene, docs, robustness**
 8. `Makefile` `venv` target installs only `.[dev]`; README's "Try it" needs

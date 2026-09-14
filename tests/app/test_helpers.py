@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 from app.helpers import (
     apply_map_click,
+    edges_to_multiline_geojson,
     format_delta,
     format_duration,
     nearest_edge_endpoints,
@@ -29,6 +30,22 @@ def test_path_to_latlon_pairs_coordinates_in_path_order():
     lat = np.array([1.0, 2.0, 3.0])
     lon = np.array([10.0, 20.0, 30.0])
     assert path_to_latlon([2, 0], lat, lon) == [(3.0, 30.0), (1.0, 10.0)]
+
+
+def test_edges_to_multiline_geojson_flips_to_lon_lat_order():
+    edges = [((1.0, 10.0), (2.0, 20.0)), ((3.0, 30.0), (4.0, 40.0))]
+    result = edges_to_multiline_geojson(edges)
+    assert result["type"] == "Feature"
+    assert result["geometry"]["type"] == "MultiLineString"
+    assert result["geometry"]["coordinates"] == [
+        [[10.0, 1.0], [20.0, 2.0]],
+        [[30.0, 3.0], [40.0, 4.0]],
+    ]
+
+
+def test_edges_to_multiline_geojson_empty_input_gives_empty_coordinates():
+    result = edges_to_multiline_geojson([])
+    assert result["geometry"]["coordinates"] == []
 
 
 @pytest.mark.parametrize(

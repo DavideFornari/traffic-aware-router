@@ -178,6 +178,30 @@ def path_to_latlon(path: list[int], lat: np.ndarray, lon: np.ndarray) -> list[tu
     return [(float(lat[i]), float(lon[i])) for i in path]
 
 
+def edges_to_multiline_geojson(
+    edges: list[tuple[tuple[float, float], tuple[float, float]]],
+) -> dict:
+    """`(lat, lon)` edge segments as a single GeoJSON `MultiLineString` Feature.
+
+    The corridor and live-traffic map layers used to add one
+    `folium.PolyLine` per edge — thousands of separate Leaflet objects for a
+    real corridor (see CLAUDE.md's P2 backlog), which is slow to render.
+    A single `MultiLineString` geometry draws the same segments as one
+    Leaflet layer instead. GeoJSON coordinates are `(lon, lat)`, the
+    opposite order from the `(lat, lon)` tuples used everywhere else in
+    this module — that flip happens here, once, rather than at every call
+    site.
+    """
+    return {
+        "type": "Feature",
+        "geometry": {
+            "type": "MultiLineString",
+            "coordinates": [[[lon, lat] for lat, lon in (start, end)] for start, end in edges],
+        },
+        "properties": {},
+    }
+
+
 def format_duration(seconds: float) -> str:
     """Human-readable duration: `"45 s"` or `"12 min 30 s"`."""
     if seconds < 60:
