@@ -16,7 +16,7 @@ from shapely.geometry import LineString, Point
 from shapely.ops import substring
 
 from router.core.dijkstra import dijkstra
-from router.core.geometry import great_circle_distance_m
+from router.core.geometry import EARTH_RADIUS_M
 from router.traffic.pipeline import TrafficResult
 
 
@@ -28,10 +28,17 @@ def nearest_node(lat: np.ndarray, lon: np.ndarray, point: tuple[float, float]) -
     block — see `nearest_edge_endpoints` for the address/click/paste case,
     where that distinction matters. Kept for callers (debug/benchmark
     scripts) that just need a quick, good-enough node for a fixed point.
+
+    Vectorised haversine (numpy over all nodes at once) rather than a
+    Python loop calling `great_circle_distance_m` per node — same formula,
+    but this is on the hot path for ~41k-node graphs while the core
+    version stays scalar for the A* heuristic's per-node calls.
     """
-    distances = [
-        great_circle_distance_m(lat[i], lon[i], point[0], point[1]) for i in range(len(lat))
-    ]
+    phi1, phi2 = np.radians(lat), np.radians(point[0])
+    dphi = np.radians(point[0] - lat)
+    dlambda = np.radians(point[1] - lon)
+    a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2) ** 2
+    distances = 2 * EARTH_RADIUS_M * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
     return int(np.argmin(distances))
 
 

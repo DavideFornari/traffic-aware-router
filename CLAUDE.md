@@ -291,12 +291,20 @@ No AppTest coverage for the new sidebar controls themselves — consistent with 
 `app/main.py`, which isn't AppTest-covered either (see the earlier UX-fix note on why the
 rerun-lag class of bug specifically can't be caught by AppTest/pytest).
 
+**Done (2026-09-14, performance)** — item 4 below: `app/helpers.py::nearest_node` was a
+pure-Python loop over all ~41k nodes, calling the scalar `great_circle_distance_m` (from
+`core/geometry.py`) once per node. Replaced with the same haversine formula evaluated once
+over the whole `lat`/`lon` numpy arrays (`np.radians`/`np.sin`/`np.cos`/`np.arcsin`, using
+`core/geometry.EARTH_RADIUS_M` so the constant isn't duplicated) — the core's scalar version
+is untouched, since A*'s heuristic still calls it once per node per search step, not once
+over a whole array. Measured: ~0.6ms per call on a synthetic 41k-node array, down from a
+Python-level loop of the same size. `nearest_node` itself is still only used by
+fixed-coordinate callers (debug/benchmark scripts) — `nearest_edge_endpoints`, the
+user-facing path, was already fast via osmnx's R-tree. No new tests needed; existing
+`test_nearest_node_picks_the_closest_point` and the snapping golden tests cover correctness
+of the vectorised formula unchanged.
+
 **P2 — performance (measure before/after; scripts exist)**
-4. `app/helpers.py::nearest_node` is a pure-Python loop over all ~41k nodes with a
-   haversine call each — two calls per query. Vectorise with numpy (or KDTree on
-   projected coords, which is also more correct than haversine at city scale). Still applies
-   to `nearest_node` itself (kept for fixed-coordinate callers); `nearest_edge_endpoints` (new,
-   used for all user-facing origin/destination input) is already fast — R-tree backed via osmnx.
 5. `_edge_position` (duplicated in `core/yen.py` and `traffic/pipeline.py`) is a linear
    scan; row indices are sorted, so `np.searchsorted` works. Deduplicate into one helper.
 6. Yen copies the full weight array per spur (`weights.copy()` — O(E) each); the
